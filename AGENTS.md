@@ -70,12 +70,31 @@ sbe-lims (показ QR в заявке/на оборудовании) — см.
   `community-plugins.json` дополнен. Репозиторий `Epyur/sbe-lims-mobile` (public),
   init-коммит, пуш на main (создание репо потребовало отдельного подтверждения
   пользователя — auto-mode классификатор блокирует `gh repo create` по умолчанию).
-- ⚠️ **Реестр на сервере (`/opt/mailers/www/registry.json`) синхронизировать
-  отдельно** — не сделано в этой сессии (нужен SSH на VDS, за отдельным
-  подтверждением). Без этого мини-магазин `sbe-mobile` на планшете не увидит
-  новый плагин по сети — только реестр в `sbe-apstore-registry` (GitHub) обновлён.
+- **Реестр на сервере синхронизирован** (`scp` → `/opt/mailers/www/registry.json`,
+  подтверждено через `https://epyur.fvds.ru/registry.json`) — мини-магазин
+  `sbe-mobile` теперь видит `sbe-lims-mobile` по сети.
+- **Живой E2E через минтинг JWT** (email `polishchuk@tn.ru`, `app_id=lab`,
+  переходный `JWT_SECRET`) против реального `lab-service` — по согласованию с
+  пользователем:
+  - Читающий путь на реальных данных: `GET /requests` (470 заявок, форма полей
+    совпадает с `MobileRequest`), `GET /requests/1407` (envelope `{request:...}`),
+    `GET /methods` (метод ГГ: `operator_form.fields` ↔ `input_parameters` по
+    `attribute_id`/`data_type` резолвятся верно; `calibration_operator_form`/
+    `calibration_attributes` — так же), `GET /equipment`.
+  - Пишущий путь — на одноразовом тестовом оборудовании (`POST /equipment` →
+    `POST /equipment/{id}/methods` role=main → `POST /equipment/{id}/calibrations`
+    тем же multipart, что строит `LimsMobileService` → `last_calibration`
+    пересчитался сервером верно) — реальные заявки/оборудование не трогали,
+    тестовая запись полностью удалена после (`DELETE /equipment/{id}/methods/1`
+    → `DELETE /equipment/{id}`, список оборудования вернулся к исходному 1 записи).
+  - `POST /requests/{id}/results` отдельно не гонялся вживую (не захотели писать
+    в реальную завершённую заявку 1407 ради теста, а создавать отдельную
+    тестовую заявку — требует scaffolding объект/проект) — но это тот же
+    JSON-POST + JWT-паттерн, что уже проверен на `POST /equipment/{id}/methods`,
+    и Go-код (`saveResultSeries`, авто-`series_num` при `seriesNum<=0`) сверен
+    построчно при написании клиента.
 - ⚠️ **E2E на Android-планшете (диплинк + камера + установка через хаб) — за
-  пользователем** — главный оставшийся технический риск, см. спеку раздел 9.
+  пользователем** — единственный оставшийся технический риск, см. спеку раздел 9.
 
 ## Статистика ошибок и отступлений
 
