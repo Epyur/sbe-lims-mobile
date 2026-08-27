@@ -1,4 +1,4 @@
-import { App, Notice, ObsidianProtocolData, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
 import { MOBILE_LIMS_VIEW_TYPE, MobileLimsView } from './ui/mobile-lims-view';
 import { LimsMobileService } from './services/lims-mobile.service';
 import { getService, publishService, unpublishService } from '../../../.obsidian/plugins/sbe-core/src/bridge';
@@ -16,10 +16,12 @@ const DEFAULT_SETTINGS: MobileLimsSettings = {
   lastAnnouncedVersion: '',
 };
 
-/** «ЛИМС Мобайл»: сканирование QR (obsidian://sbe-lims-mobile) → форма ввода
- * результатов испытания / калибровки оборудования → отправка в lab-service.
- * Чистый потребитель авторизации ЦУП (getService('sbe-apstore')) — своего
- * экрана входа нет, как и у десктопного sbe-lims. */
+/** «ЛИМС Мобайл»: номер заявки/код оборудования (переписанный вручную из QR,
+ * который сканирует внешнее приложение телефона — у Obsidian mobile нет
+ * доступа к камере) → форма ввода результатов испытания / калибровки
+ * оборудования → отправка в lab-service. Чистый потребитель авторизации ЦУП
+ * (getService('sbe-apstore')) — своего экрана входа нет, как и у десктопного
+ * sbe-lims. */
 export default class SbeLimsMobilePlugin extends Plugin {
   settings!: MobileLimsSettings;
   syncService!: LimsMobileService;
@@ -43,12 +45,6 @@ export default class SbeLimsMobilePlugin extends Plugin {
     });
 
     this.addSettingTab(new MobileLimsSettingsTab(this.app, this));
-
-    // obsidian://sbe-lims-mobile?action=result&request=<id>
-    // obsidian://sbe-lims-mobile?action=calibrate&equipment=<id>
-    this.registerObsidianProtocolHandler('sbe-lims-mobile', (params) => {
-      void this.handleDeepLink(params);
-    });
 
     // Публикация в мост window.SBE — без этого мини-магазин sbe-mobile не может
     // найти и открыть плагин («Открыть» вызывает getService('sbe-lims-mobile')),
@@ -94,16 +90,6 @@ export default class SbeLimsMobilePlugin extends Plugin {
     }
     workspace.revealLeaf(leaf);
     return leaf.view instanceof MobileLimsView ? leaf.view : null;
-  }
-
-  private async handleDeepLink(params: ObsidianProtocolData): Promise<void> {
-    const view = await this.activateView();
-    if (!view) return;
-    if (params.action === 'result' && params.request) {
-      view.openResult(Number(params.request));
-    } else if (params.action === 'calibrate' && params.equipment) {
-      view.openCalibrate(Number(params.equipment));
-    }
   }
 
   /** Публикует в «Новости» сообщение о своём обновлении — один раз на версию

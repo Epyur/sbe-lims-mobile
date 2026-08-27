@@ -1,33 +1,11 @@
 import { ItemView, Notice, WorkspaceLeaf } from 'obsidian';
 import type SbeLimsMobilePlugin from '../main';
 import { errorMessage } from '../../../../.obsidian/plugins/sbe-core/src/utils/errors';
-import { QrScannerModal } from './qr-scanner-modal';
 import type {
   AttributeDataType, CalibrationAttribute, EquipmentMethodLink, MobileMethod, OperatorFormField,
 } from '../types';
 
 export const MOBILE_LIMS_VIEW_TYPE = 'sbe-lims-mobile-view';
-
-/** Разбирает диплинк, декодированный сканером (тот же формат, что
- * registerObsidianProtocolHandler получает из обычного obsidian:// перехода —
- * см. main.ts). */
-function parseDeepLink(raw: string): { action: 'result' | 'calibrate'; id: number } | null {
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== 'obsidian:') return null;
-    const action = url.searchParams.get('action');
-    if (action === 'result') {
-      const id = Number(url.searchParams.get('request'));
-      if (id > 0) return { action: 'result', id };
-    } else if (action === 'calibrate') {
-      const id = Number(url.searchParams.get('equipment'));
-      if (id > 0) return { action: 'calibrate', id };
-    }
-  } catch (e: unknown) {
-    console.warn('ЛИМС Мобайл: QR не похож на диплинк:', errorMessage(e));
-  }
-  return null;
-}
 
 type Screen =
   | { kind: 'home' }
@@ -96,21 +74,18 @@ export class MobileLimsView extends ItemView {
   private renderHome(body: HTMLElement): void {
     body.createDiv({
       cls: 'tn-lm-hint',
-      text: 'Отсканируйте QR штатной камерой телефона (если она предлагает открыть Obsidian) ' +
-        'или воспользуйтесь встроенным сканером ниже.',
+      text: 'Отсканируйте QR камерой/любым QR-сканером телефона — он покажет номер заявки ' +
+        'или код оборудования. Скопируйте номер и вставьте в поле ниже.',
     });
 
-    const scanBtn = body.createEl('button', { text: '📷 Сканировать QR', cls: 'tn-btn tn-btn-primary tn-lm-mb8' });
-    scanBtn.addEventListener('click', () => this.openScanner());
-
-    body.createEl('h4', { text: 'Ручной ввод (если QR недоступен)' });
+    body.createEl('h4', { text: 'Открыть по номеру' });
     let mode: 'request' | 'equipment' = 'request';
     const modeRow = body.createDiv({ cls: 'tn-lm-flex tn-lm-mb8' });
     const reqBtn = modeRow.createEl('button', { text: 'Заявка', cls: 'tn-btn tn-btn-primary' });
     const eqBtn = modeRow.createEl('button', { text: 'Оборудование', cls: 'tn-btn tn-btn-ghost' });
 
     const input = body.createEl('input', {
-      attr: { type: 'text', placeholder: 'Номер заявки (287/2026) или код/название оборудования' },
+      attr: { type: 'text', placeholder: 'Вставьте номер из QR или введите вручную (287/2026, код оборудования)' },
       cls: 'tn-lm-input tn-lm-mb8',
     });
     const openBtn = body.createEl('button', { text: 'Открыть', cls: 'tn-btn tn-btn-primary' });
@@ -338,17 +313,19 @@ export class MobileLimsView extends ItemView {
 
   // ---- Общие помощники ----
 
-  /** Фото результата испытания (photo_before/photo_after заявки) — снимок сразу
-   * загружается на сервер (POST /file), в форму результатов подставляется
-   * готовая ссылка (требование JSON-эндпоинта POST /requests/{id}/results). */
+  /** Фото результата испытания (photo_before/photo_after заявки) — выбор файла
+   * из галереи (без атрибута capture: у Obsidian mobile нет доступа к камере,
+   * см. AGENTS.md). Снимок сразу загружается на сервер (POST /file), в форму
+   * результатов подставляется готовая ссылка (требование JSON-эндпоинта
+   * POST /requests/{id}/results). */
   private renderPhotoUploadPicker(
     container: HTMLElement, label: string, requestId: number, onUploaded: (url: string) => void,
   ): void {
     const row = container.createDiv({ cls: 'tn-lm-photo-row tn-lm-mb8' });
-    const btn = row.createEl('button', { text: `📷 ${label}`, cls: 'tn-btn tn-btn-ghost' });
+    const btn = row.createEl('button', { text: `🖼 ${label}`, cls: 'tn-btn tn-btn-ghost' });
     const status = row.createDiv({ cls: 'tn-lm-meta' });
     const input = row.createEl('input', {
-      attr: { type: 'file', accept: 'image/*', capture: 'environment' },
+      attr: { type: 'file', accept: 'image/*' },
     });
     input.addClass('tn-lm-hidden-file-input');
     btn.addEventListener('click', () => input.click());
@@ -370,17 +347,18 @@ export class MobileLimsView extends ItemView {
     });
   }
 
-  /** Фото к записи калибровки — байты держим локально и отправляем ВМЕСТЕ с
+  /** Фото к записи калибровки — выбор файла из галереи (без capture, см.
+   * renderPhotoUploadPicker); байты держим локально и отправляем ВМЕСТЕ с
    * остальной формой при сохранении (createEquipmentCalibration — один
    * multipart-запрос, без отдельного /file, тот же паттерн, что на десктопе). */
   private renderPhotoCapturePicker(
     container: HTMLElement, label: string, onCaptured: (photo: { data: ArrayBuffer; fileName: string }) => void,
   ): void {
     const row = container.createDiv({ cls: 'tn-lm-photo-row tn-lm-mb8' });
-    const btn = row.createEl('button', { text: `📷 ${label}`, cls: 'tn-btn tn-btn-ghost' });
+    const btn = row.createEl('button', { text: `🖼 ${label}`, cls: 'tn-btn tn-btn-ghost' });
     const status = row.createDiv({ cls: 'tn-lm-meta' });
     const input = row.createEl('input', {
-      attr: { type: 'file', accept: 'image/*', capture: 'environment' },
+      attr: { type: 'file', accept: 'image/*' },
     });
     input.addClass('tn-lm-hidden-file-input');
     btn.addEventListener('click', () => input.click());
@@ -423,19 +401,5 @@ export class MobileLimsView extends ItemView {
     body.createDiv({ cls: 'tn-lm-error', text: message });
     const retryBtn = body.createEl('button', { text: 'Повторить', cls: 'tn-btn tn-btn-ghost tn-lm-mt8' });
     retryBtn.addEventListener('click', retry);
-  }
-
-  /** Встроенный сканер (jsQR + камера) — фолбэк на случай, если камера
-   * телефона не предлагает открыть Obsidian по obsidian://-ссылке из QR. */
-  private openScanner(): void {
-    new QrScannerModal(this.app, (raw) => {
-      const parsed = parseDeepLink(raw);
-      if (!parsed) {
-        new Notice('QR не распознан как ссылка ЛИМС — проверьте, тот ли это код.');
-        return;
-      }
-      if (parsed.action === 'result') this.openResult(parsed.id);
-      else this.openCalibrate(parsed.id);
-    }).open();
   }
 }
