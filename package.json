@@ -1,0 +1,16 @@
+{
+  "name": "sbe-lims-mobile",
+  "version": "0.1.0",
+  "description": "ЛИМС Мобайл — мобильный ввод результатов испытаний и калибровки оборудования по QR",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "esbuild": "^0.28.1",
+    "obsidian": "^1.11.4",
+    "typescript": "^5.8.3"
+  }
+}

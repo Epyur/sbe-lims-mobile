@@ -1,0 +1,100 @@
+/* Классы вьюхи «ЛИМС Мобайл» (tn-lm-*) на семантических токенах дизайн-системы SBE. */
+
+.tn-lm-container {
+  padding: 16px;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.tn-lm-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.tn-lm-title {
+  font-size: 1.2em;
+  font-weight: 700;
+}
+
+.tn-lm-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tn-lm-hint {
+  color: var(--content-secondary-enabled, #667387);
+  margin-bottom: 8px;
+}
+
+.tn-lm-meta {
+  color: var(--content-secondary-enabled, #667387);
+}
+
+.tn-lm-error {
+  color: var(--tn-danger, #E11B17);
+  min-height: 1.2em;
+}
+
+.tn-lm-flex {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tn-lm-mb8 {
+  margin-bottom: 8px;
+}
+
+.tn-lm-mt8 {
+  margin-top: 8px;
+}
+
+.tn-lm-input {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-radius: var(--tn-radius-sm, 10px);
+  border: 1px solid var(--tn-border, #E7EAEF);
+  box-sizing: border-box;
+  font-size: 1em;
+}
+
+.tn-lm-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tn-lm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tn-lm-label {
+  font-weight: 600;
+}
+
+.tn-lm-help {
+  font-size: 0.85em;
+  color: var(--content-secondary-enabled, #667387);
+}
+
+.tn-lm-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tn-lm-list button {
+  min-height: 44px;
+  text-align: left;
+}
+
+.tn-lm-body button {
+  min-height: 44px;
+}
