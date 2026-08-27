@@ -70,10 +70,17 @@ export class LimsMobileService {
   }
 
   /** series_num не передаём — сервер сам берёт следующий свободный (saveResultSeries).
-   * photoBefore/photoAfter — уже загруженные file_url (см. uploadFile). */
+   * photoBefore/photoAfter — уже загруженные file_url (см. uploadFile). Системные
+   * поля (reportDate/samplesInDate/expDate/ambTemp/ambPres/ambMoist) уходят НЕ в
+   * values — сервер пишет их напрямую в колонки requests (см. lab-service
+   * updateRequestSystemFields, 2026-08-27); пустая строка = не менять текущее. */
   async saveResult(
     requestId: number, methodId: number, values: Record<string, unknown>,
-    photoBefore?: string, photoAfter?: string,
+    extra?: {
+      photoBefore?: string; photoAfter?: string;
+      reportDate?: string; samplesInDate?: string; expDate?: string;
+      ambTemp?: string; ambPres?: string; ambMoist?: string;
+    },
   ): Promise<void> {
     const token = await this.getToken();
     const res = await this.request({
@@ -82,7 +89,9 @@ export class LimsMobileService {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({
         method_id: methodId, values,
-        photo_before: photoBefore || '', photo_after: photoAfter || '',
+        photo_before: extra?.photoBefore || '', photo_after: extra?.photoAfter || '',
+        report_date: extra?.reportDate || '', samples_in_date: extra?.samplesInDate || '', exp_date: extra?.expDate || '',
+        amb_temp: extra?.ambTemp || '', amb_pres: extra?.ambPres || '', amb_moist: extra?.ambMoist || '',
       }),
     });
     this.assertOk(res);
@@ -142,6 +151,7 @@ export class LimsMobileService {
 
   async createEquipmentCalibration(
     equipmentId: number, methodId: number, values: Record<string, unknown>,
+    env?: { ambTemp?: string; ambPres?: string; ambMoist?: string },
     photo?: { data: ArrayBuffer; fileName: string },
   ): Promise<void> {
     const token = await this.getToken();
@@ -150,6 +160,7 @@ export class LimsMobileService {
       calibrated_at: new Date().toISOString().slice(0, 10),
       method_id: String(methodId),
       values: JSON.stringify(values || {}),
+      amb_temp: env?.ambTemp || '', amb_pres: env?.ambPres || '', amb_moist: env?.ambMoist || '',
     };
     const body = this.buildMultipart(
       boundary, fields, photo ? { field: 'file', data: photo.data, fileName: photo.fileName } : undefined,

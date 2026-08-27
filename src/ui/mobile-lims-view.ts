@@ -1,6 +1,9 @@
 import { ItemView, Notice, WorkspaceLeaf } from 'obsidian';
 import type SbeLimsMobilePlugin from '../main';
 import { errorMessage } from '../../../../.obsidian/plugins/sbe-core/src/utils/errors';
+import {
+  CALIBRATION_SYSTEM_FIELDS, RESULT_SYSTEM_FIELDS,
+} from '../types';
 import type {
   AttributeDataType, CalibrationAttribute, EquipmentMethodLink, MobileMethod, OperatorFormField,
 } from '../types';
@@ -163,14 +166,27 @@ export class MobileLimsView extends ItemView {
     body.createDiv({ cls: 'tn-lm-meta tn-lm-mb8', text: `Метод: ${method.code}${method.name ? ' — ' + method.name : ''}` });
 
     const attrById = new Map(method.input_parameters.map(a => [a.id, a] as const));
+    // Системные поля (2026-08-27) — те же id, что requests.report_date/
+    // samples_in_date/exp_date/amb_temp/amb_pres/amb_moist; попадают в форму,
+    // только если админ явно добавил их в operator_form.fields конфигуратора
+    // (см. sbe-lims OPERATOR_FORM_SYSTEM_FIELDS) — значения идут отдельно от
+    // values (это колонки requests, не JSONB атрибуты метода).
+    const systemById = new Map(RESULT_SYSTEM_FIELDS.map(s => [s.id, s] as const));
     const fields: OperatorFormField[] = method.operator_form.fields.length > 0
       ? method.operator_form.fields
       : method.input_parameters.map(a => ({ attribute_id: a.id, label: a.name, required: false }));
 
     const values: Record<string, unknown> = {};
+    const systemValues: Record<string, unknown> = {};
     const form = body.createDiv({ cls: 'tn-lm-form' });
     let hasFields = false;
     for (const field of fields) {
+      const sys = systemById.get(field.attribute_id);
+      if (sys) {
+        hasFields = true;
+        this.renderFormField(form, { ...field, label: field.label || sys.label }, sys.data_type, systemValues);
+        continue;
+      }
       const attr = attrById.get(field.attribute_id);
       if (attr && attr.data_type === 'photo') continue; // вне scope v1
       hasFields = true;
@@ -194,7 +210,12 @@ export class MobileLimsView extends ItemView {
         errDiv.setText('');
         submitBtn.setAttr('disabled', 'true');
         try {
-          await this.plugin.syncService.saveResult(requestId, methodId, values, photoBeforeUrl, photoAfterUrl);
+          const sv = (id: string): string | undefined => systemValues[id] === undefined ? undefined : String(systemValues[id]);
+          await this.plugin.syncService.saveResult(requestId, methodId, values, {
+            photoBefore: photoBeforeUrl, photoAfter: photoAfterUrl,
+            reportDate: sv('report_date'), samplesInDate: sv('samples_in_date'), expDate: sv('exp_date'),
+            ambTemp: sv('amb_temp'), ambPres: sv('amb_pres'), ambMoist: sv('amb_moist'),
+          });
           new Notice('Результаты отправлены');
           this.screen = { kind: 'home' };
           this.render();
@@ -287,6 +308,16 @@ export class MobileLimsView extends ItemView {
       return;
     }
 
+    // Условия среды при калибровке (2026-08-27) — сервер принимает их как
+    // отдельные поля ЛЮБОЙ калибровки, всегда (equipment_ext.go), поэтому
+    // показываем без привязки к конфигуратору, в отличие от обычных
+    // результатов испытания (там — опционально, см. renderResultScreen).
+    const envValues: Record<string, unknown> = {};
+    const envForm = body.createDiv({ cls: 'tn-lm-form tn-lm-mb8' });
+    for (const s of CALIBRATION_SYSTEM_FIELDS) {
+      this.renderFormField(envForm, { attribute_id: s.id, label: s.label, required: false }, s.data_type, envValues);
+    }
+
     let photo: { data: ArrayBuffer; fileName: string } | undefined;
     this.renderPhotoCapturePicker(body, 'Фото к записи калибровки', (captured) => { photo = captured; });
 
@@ -298,7 +329,10 @@ export class MobileLimsView extends ItemView {
         errDiv.setText('');
         submitBtn.setAttr('disabled', 'true');
         try {
-          await this.plugin.syncService.createEquipmentCalibration(equipmentId, methodId, values, photo);
+          const ev = (id: string): string | undefined => envValues[id] === undefined ? undefined : String(envValues[id]);
+          await this.plugin.syncService.createEquipmentCalibration(equipmentId, methodId, values, {
+            ambTemp: ev('amb_temp'), ambPres: ev('amb_pres'), ambMoist: ev('amb_moist'),
+          }, photo);
           new Notice('Запись калибровки сохранена');
           this.screen = { kind: 'home' };
           this.render();
