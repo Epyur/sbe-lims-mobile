@@ -553,6 +553,34 @@
   text-align: left;
 }
 
+.tn-lm-scanner-modal {
+  max-width: 480px;
+}
+
+.tn-lm-scanner-video {
+  width: 100%;
+  max-height: 60vh;
+  border-radius: var(--tn-radius, 12px);
+  background: #000;
+}
+
+.tn-lm-photo-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tn-lm-photo-thumb {
+  max-width: 64px;
+  max-height: 64px;
+  border-radius: 6px;
+}
+
+.tn-lm-hidden-file-input {
+  display: none;
+}
+
 .tn-lm-body button {
   min-height: 44px;
 }

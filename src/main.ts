@@ -83,12 +83,15 @@ export default class SbeLimsMobilePlugin extends Plugin {
 
   async activateView(): Promise<MobileLimsView | null> {
     const { workspace } = this.app;
+    // Обычная вкладка (как у десктопного sbe-lims: getLeaf(false)) — НЕ правая
+    // панель/drawer: getRightLeaf на мобиле всегда находит правый drawer, из-за
+    // чего плагин открывался там, а не полноэкранной вкладкой (правка 2026-08-27
+    // по прямому запросу пользователя).
     let leaf = workspace.getLeavesOfType(MOBILE_LIMS_VIEW_TYPE).first();
     if (!leaf) {
-      leaf = workspace.getRightLeaf(false) ?? workspace.getLeaf('tab');
-      if (leaf) await leaf.setViewState({ type: MOBILE_LIMS_VIEW_TYPE, active: true });
+      leaf = workspace.getLeaf(false);
+      await leaf.setViewState({ type: MOBILE_LIMS_VIEW_TYPE, active: true });
     }
-    if (!leaf) return null;
     workspace.revealLeaf(leaf);
     return leaf.view instanceof MobileLimsView ? leaf.view : null;
   }

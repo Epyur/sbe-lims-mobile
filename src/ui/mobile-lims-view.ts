@@ -1,11 +1,33 @@
 import { ItemView, Notice, WorkspaceLeaf } from 'obsidian';
 import type SbeLimsMobilePlugin from '../main';
 import { errorMessage } from '../../../../.obsidian/plugins/sbe-core/src/utils/errors';
+import { QrScannerModal } from './qr-scanner-modal';
 import type {
   AttributeDataType, CalibrationAttribute, EquipmentMethodLink, MobileMethod, OperatorFormField,
 } from '../types';
 
 export const MOBILE_LIMS_VIEW_TYPE = 'sbe-lims-mobile-view';
+
+/** Разбирает диплинк, декодированный сканером (тот же формат, что
+ * registerObsidianProtocolHandler получает из обычного obsidian:// перехода —
+ * см. main.ts). */
+function parseDeepLink(raw: string): { action: 'result' | 'calibrate'; id: number } | null {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'obsidian:') return null;
+    const action = url.searchParams.get('action');
+    if (action === 'result') {
+      const id = Number(url.searchParams.get('request'));
+      if (id > 0) return { action: 'result', id };
+    } else if (action === 'calibrate') {
+      const id = Number(url.searchParams.get('equipment'));
+      if (id > 0) return { action: 'calibrate', id };
+    }
+  } catch (e: unknown) {
+    console.warn('ЛИМС Мобайл: QR не похож на диплинк:', errorMessage(e));
+  }
+  return null;
+}
 
 type Screen =
   | { kind: 'home' }
@@ -74,8 +96,12 @@ export class MobileLimsView extends ItemView {
   private renderHome(body: HTMLElement): void {
     body.createDiv({
       cls: 'tn-lm-hint',
-      text: 'Отсканируйте QR на образце или оборудовании штатной камерой телефона — форма откроется здесь автоматически.',
+      text: 'Отсканируйте QR штатной камерой телефона (если она предлагает открыть Obsidian) ' +
+        'или воспользуйтесь встроенным сканером ниже.',
     });
+
+    const scanBtn = body.createEl('button', { text: '📷 Сканировать QR', cls: 'tn-btn tn-btn-primary tn-lm-mb8' });
+    scanBtn.addEventListener('click', () => this.openScanner());
 
     body.createEl('h4', { text: 'Ручной ввод (если QR недоступен)' });
     let mode: 'request' | 'equipment' = 'request';
@@ -180,6 +206,11 @@ export class MobileLimsView extends ItemView {
       return;
     }
 
+    let photoBeforeUrl = '';
+    let photoAfterUrl = '';
+    this.renderPhotoUploadPicker(body, 'Фото до испытания', requestId, (url) => { photoBeforeUrl = url; });
+    this.renderPhotoUploadPicker(body, 'Фото после испытания', requestId, (url) => { photoAfterUrl = url; });
+
     const errDiv = body.createDiv({ cls: 'tn-lm-error tn-lm-mt8' });
     const submitBtn = body.createEl('button', { text: 'Отправить результаты', cls: 'tn-btn tn-btn-primary tn-lm-mt8' });
     const methodId = method.id;
@@ -188,7 +219,7 @@ export class MobileLimsView extends ItemView {
         errDiv.setText('');
         submitBtn.setAttr('disabled', 'true');
         try {
-          await this.plugin.syncService.saveResult(requestId, methodId, values);
+          await this.plugin.syncService.saveResult(requestId, methodId, values, photoBeforeUrl, photoAfterUrl);
           new Notice('Результаты отправлены');
           this.screen = { kind: 'home' };
           this.render();
@@ -281,6 +312,9 @@ export class MobileLimsView extends ItemView {
       return;
     }
 
+    let photo: { data: ArrayBuffer; fileName: string } | undefined;
+    this.renderPhotoCapturePicker(body, 'Фото к записи калибровки', (captured) => { photo = captured; });
+
     const errDiv = body.createDiv({ cls: 'tn-lm-error tn-lm-mt8' });
     const submitBtn = body.createEl('button', { text: 'Сохранить запись', cls: 'tn-btn tn-btn-primary tn-lm-mt8' });
     const methodId = method.id;
@@ -289,7 +323,7 @@ export class MobileLimsView extends ItemView {
         errDiv.setText('');
         submitBtn.setAttr('disabled', 'true');
         try {
-          await this.plugin.syncService.createEquipmentCalibration(equipmentId, methodId, values);
+          await this.plugin.syncService.createEquipmentCalibration(equipmentId, methodId, values, photo);
           new Notice('Запись калибровки сохранена');
           this.screen = { kind: 'home' };
           this.render();
@@ -303,6 +337,64 @@ export class MobileLimsView extends ItemView {
   }
 
   // ---- Общие помощники ----
+
+  /** Фото результата испытания (photo_before/photo_after заявки) — снимок сразу
+   * загружается на сервер (POST /file), в форму результатов подставляется
+   * готовая ссылка (требование JSON-эндпоинта POST /requests/{id}/results). */
+  private renderPhotoUploadPicker(
+    container: HTMLElement, label: string, requestId: number, onUploaded: (url: string) => void,
+  ): void {
+    const row = container.createDiv({ cls: 'tn-lm-photo-row tn-lm-mb8' });
+    const btn = row.createEl('button', { text: `📷 ${label}`, cls: 'tn-btn tn-btn-ghost' });
+    const status = row.createDiv({ cls: 'tn-lm-meta' });
+    const input = row.createEl('input', {
+      attr: { type: 'file', accept: 'image/*', capture: 'environment' },
+    });
+    input.addClass('tn-lm-hidden-file-input');
+    btn.addEventListener('click', () => input.click());
+    input.addEventListener('change', () => {
+      void (async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        status.setText('Загрузка…');
+        try {
+          const data = await file.arrayBuffer();
+          const url = await this.plugin.syncService.uploadFile(data, file.name, requestId);
+          onUploaded(url);
+          status.empty();
+          status.createEl('img', { cls: 'tn-lm-photo-thumb', attr: { src: url } });
+        } catch (e: unknown) {
+          status.setText(`Ошибка загрузки: ${errorMessage(e)}`);
+        }
+      })();
+    });
+  }
+
+  /** Фото к записи калибровки — байты держим локально и отправляем ВМЕСТЕ с
+   * остальной формой при сохранении (createEquipmentCalibration — один
+   * multipart-запрос, без отдельного /file, тот же паттерн, что на десктопе). */
+  private renderPhotoCapturePicker(
+    container: HTMLElement, label: string, onCaptured: (photo: { data: ArrayBuffer; fileName: string }) => void,
+  ): void {
+    const row = container.createDiv({ cls: 'tn-lm-photo-row tn-lm-mb8' });
+    const btn = row.createEl('button', { text: `📷 ${label}`, cls: 'tn-btn tn-btn-ghost' });
+    const status = row.createDiv({ cls: 'tn-lm-meta' });
+    const input = row.createEl('input', {
+      attr: { type: 'file', accept: 'image/*', capture: 'environment' },
+    });
+    input.addClass('tn-lm-hidden-file-input');
+    btn.addEventListener('click', () => input.click());
+    input.addEventListener('change', () => {
+      void (async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        const data = await file.arrayBuffer();
+        onCaptured({ data, fileName: file.name });
+        status.empty();
+        status.createEl('img', { cls: 'tn-lm-photo-thumb', attr: { src: URL.createObjectURL(file) } });
+      })();
+    });
+  }
 
   private renderFormField(
     container: HTMLElement, field: OperatorFormField, dataType: AttributeDataType, values: Record<string, unknown>,
@@ -331,5 +423,19 @@ export class MobileLimsView extends ItemView {
     body.createDiv({ cls: 'tn-lm-error', text: message });
     const retryBtn = body.createEl('button', { text: 'Повторить', cls: 'tn-btn tn-btn-ghost tn-lm-mt8' });
     retryBtn.addEventListener('click', retry);
+  }
+
+  /** Встроенный сканер (jsQR + камера) — фолбэк на случай, если камера
+   * телефона не предлагает открыть Obsidian по obsidian://-ссылке из QR. */
+  private openScanner(): void {
+    new QrScannerModal(this.app, (raw) => {
+      const parsed = parseDeepLink(raw);
+      if (!parsed) {
+        new Notice('QR не распознан как ссылка ЛИМС — проверьте, тот ли это код.');
+        return;
+      }
+      if (parsed.action === 'result') this.openResult(parsed.id);
+      else this.openCalibrate(parsed.id);
+    }).open();
   }
 }

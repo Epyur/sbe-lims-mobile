@@ -69,16 +69,41 @@ export class LimsMobileService {
     }
   }
 
-  /** series_num не передаём — сервер сам берёт следующий свободный (saveResultSeries). */
-  async saveResult(requestId: number, methodId: number, values: Record<string, unknown>): Promise<void> {
+  /** series_num не передаём — сервер сам берёт следующий свободный (saveResultSeries).
+   * photoBefore/photoAfter — уже загруженные file_url (см. uploadFile). */
+  async saveResult(
+    requestId: number, methodId: number, values: Record<string, unknown>,
+    photoBefore?: string, photoAfter?: string,
+  ): Promise<void> {
     const token = await this.getToken();
     const res = await this.request({
       url: `${this.baseUrl}/api/lab/requests/${requestId}/results`,
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ method_id: methodId, values }),
+      body: JSON.stringify({
+        method_id: methodId, values,
+        photo_before: photoBefore || '', photo_after: photoAfter || '',
+      }),
     });
     this.assertOk(res);
+  }
+
+  /** Загружает фото (или любой файл) в S3 через lab-service, возвращает
+   * стабильную ссылку (file_url) для подстановки в photo_before/photo_after. */
+  async uploadFile(data: ArrayBuffer, fileName: string, requestId: number): Promise<string> {
+    const token = await this.getToken();
+    const boundary = this.multipartBoundary();
+    const body = this.buildMultipart(boundary, { request_id: String(requestId) }, { field: 'file', data, fileName });
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/file`,
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+      body,
+    }, 60000);
+    this.assertOk(res);
+    const parsed = JSON.parse(res.text) as { file_url?: string };
+    if (!parsed.file_url) throw new Error('Сервер не вернул ссылку на загруженный файл');
+    return parsed.file_url;
   }
 
   async listEquipment(): Promise<MobileEquipment[]> {
@@ -117,6 +142,7 @@ export class LimsMobileService {
 
   async createEquipmentCalibration(
     equipmentId: number, methodId: number, values: Record<string, unknown>,
+    photo?: { data: ArrayBuffer; fileName: string },
   ): Promise<void> {
     const token = await this.getToken();
     const boundary = this.multipartBoundary();
@@ -125,7 +151,9 @@ export class LimsMobileService {
       method_id: String(methodId),
       values: JSON.stringify(values || {}),
     };
-    const body = this.buildMultipart(boundary, fields);
+    const body = this.buildMultipart(
+      boundary, fields, photo ? { field: 'file', data: photo.data, fileName: photo.fileName } : undefined,
+    );
     const res = await this.request({
       url: `${this.baseUrl}/api/lab/equipment/${equipmentId}/calibrations`,
       method: 'POST',
@@ -139,11 +167,21 @@ export class LimsMobileService {
     return '----sbe-lims-mobile-' + Date.now().toString(36);
   }
 
-  private buildMultipart(boundary: string, fields: Record<string, string>): ArrayBuffer {
+  private buildMultipart(
+    boundary: string, fields: Record<string, string>,
+    file?: { field: string; data: ArrayBuffer; fileName: string },
+  ): ArrayBuffer {
     const enc = new TextEncoder();
     const parts: Uint8Array[] = [];
     for (const [name, value] of Object.entries(fields)) {
       parts.push(enc.encode(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
+    }
+    if (file) {
+      parts.push(enc.encode(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${file.field}"; filename="${file.fileName}"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+      ));
+      parts.push(new Uint8Array(file.data));
+      parts.push(enc.encode('\r\n'));
     }
     parts.push(enc.encode(`--${boundary}--\r\n`));
     let total = 0;
