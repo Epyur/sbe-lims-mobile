@@ -1,9 +1,9 @@
 import { App, Notice, ObsidianProtocolData, Plugin, PluginSettingTab, Setting } from 'obsidian';
 import { MOBILE_LIMS_VIEW_TYPE, MobileLimsView } from './ui/mobile-lims-view';
 import { LimsMobileService } from './services/lims-mobile.service';
-import { getService } from '../../../.obsidian/plugins/sbe-core/src/bridge';
+import { getService, publishService, unpublishService } from '../../../.obsidian/plugins/sbe-core/src/bridge';
 import { errorMessage } from '../../../.obsidian/plugins/sbe-core/src/utils/errors';
-import type { AnnounceUpdateInput } from '../../../.obsidian/plugins/sbe-core/src/types';
+import type { AnnounceUpdateInput, SbeLimsMobileApi } from '../../../.obsidian/plugins/sbe-core/src/types';
 
 export interface MobileLimsSettings {
   /** База URL lab-service (JWT берётся из ЦУП/ЦУП Мобайл — sbe-apstore). */
@@ -50,12 +50,25 @@ export default class SbeLimsMobilePlugin extends Plugin {
       void this.handleDeepLink(params);
     });
 
+    // Публикация в мост window.SBE — без этого мини-магазин sbe-mobile не может
+    // найти и открыть плагин («Открыть» вызывает getService('sbe-lims-mobile')),
+    // тот же паттерн, что у любого другого SBE-плагина с вьюхой (sbe-lims и т.д.).
+    publishService<SbeLimsMobileApi>('sbe-lims-mobile', {
+      open: async () => {
+        await this.activateView();
+      },
+    }, {
+      version: this.manifest.version,
+      name: this.manifest.name,
+    });
+
     this.app.workspace.onLayoutReady(() => {
       void this.announceIfNeeded();
     });
   }
 
   onunload(): void {
+    unpublishService('sbe-lims-mobile');
     this.app.workspace.detachLeavesOfType(MOBILE_LIMS_VIEW_TYPE);
   }
 

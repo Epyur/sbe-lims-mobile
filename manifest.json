@@ -1,7 +1,7 @@
 {
   "id": "sbe-lims-mobile",
   "name": "ЛИМС Мобайл",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.11.4",
   "description": "Мобильный ввод результатов испытаний и калибровки оборудования по QR (сканирование этикетки → форма → отправка в lab-service).",
   "author": "Полищук Евгений (polishchuk@tn.ru)",
