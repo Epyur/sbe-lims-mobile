@@ -1,7 +1,9 @@
 import { requestUrl, RequestUrlParam } from 'obsidian';
 import { getService } from '../../../../.obsidian/plugins/sbe-core/src/bridge';
 import { errorMessage } from '../../../../.obsidian/plugins/sbe-core/src/utils/errors';
-import type { EquipmentMethodLink, MethodEquipmentLink, MobileEquipment, MobileMethod, MobileRequest } from '../types';
+import type {
+  EquipmentMethodLink, MethodEquipmentLink, MobileEquipment, MobileMethod, MobileRequest, MobileResult,
+} from '../types';
 
 /** Клиент lab-service для мобильного ввода — узкое подмножество вызовов, тот же
  * паттерн, что sbe-lims/src/services/sync.service.ts (getToken через мост ЦУП,
@@ -84,6 +86,10 @@ export class LimsMobileService {
        * только когда у метода больше одной единицы "Основного" оборудования, см.
        * mobile-lims-view.ts renderResultScreen/listAllMethodEquipment. */
       equipmentId?: number;
+      /** Номер существующей серии — правка на месте (2026-08-28, WP3a): сервер
+       * апсертит по (request_id, method_id, series_num), новый эндпоинт не нужен.
+       * Не передавать при создании НОВОЙ серии — сервер сам назначит следующий. */
+      seriesNum?: number;
     },
   ): Promise<void> {
     const token = await this.getToken();
@@ -97,7 +103,39 @@ export class LimsMobileService {
         report_date: extra?.reportDate || '', samples_in_date: extra?.samplesInDate || '', exp_date: extra?.expDate || '',
         amb_temp: extra?.ambTemp || '', amb_pres: extra?.ambPres || '', amb_moist: extra?.ambMoist || '',
         equipment_id: extra?.equipmentId,
+        series_num: extra?.seriesNum,
       }),
+    });
+    this.assertOk(res);
+  }
+
+  /** Список серий заявки (2026-08-28, WP3a) — для экрана «список серий» перед формой
+   * (см. mobile-lims-view.ts renderResultListScreen) и предзаполнения формы правки. */
+  async listResults(requestId: number): Promise<MobileResult[]> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/requests/${requestId}/results`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as { results?: MobileResult[] };
+      return Array.isArray(data.results) ? data.results : [];
+    } catch (e: unknown) {
+      console.warn('ЛИМС Мобайл: не JSON в ответе results:', errorMessage(e));
+      return [];
+    }
+  }
+
+  /** Удаление серии с перенумерацией последующих (2026-08-28, WP3a) — сервер сам
+   * сдвигает series_num всех следующих серий этого метода на −1. */
+  async deleteResultSeries(requestId: number, seriesNum: number): Promise<void> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/requests/${requestId}/results/${seriesNum}`,
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
     });
     this.assertOk(res);
   }

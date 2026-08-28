@@ -52,6 +52,19 @@ export interface MobileRequest {
   status: string;
 }
 
+/** Серия результата испытания (GET /requests/{id}/results, 2026-08-28, WP3a) — узкое
+ * подмножество, нужное для списка серий и предзаполнения формы правки (см.
+ * mobile-lims-view.ts renderResultListScreen). */
+export interface MobileResult {
+  id: number;
+  request_id: number;
+  method_id: number;
+  series_num: number;
+  values: Record<string, unknown>;
+  equipment_id: number;
+  is_statistical_row: boolean;
+}
+
 export interface MobileEquipment {
   id: number;
   code: string;

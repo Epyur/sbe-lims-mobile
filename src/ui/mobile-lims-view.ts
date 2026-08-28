@@ -5,14 +5,19 @@ import {
   CALIBRATION_SYSTEM_FIELDS, RESULT_SYSTEM_FIELDS,
 } from '../types';
 import type {
-  AttributeDataType, CalibrationAttribute, EquipmentMethodLink, MobileMethod, OperatorFormField,
+  AttributeDataType, CalibrationAttribute, EquipmentMethodLink, MobileMethod, MobileResult, OperatorFormField,
 } from '../types';
 
 export const MOBILE_LIMS_VIEW_TYPE = 'sbe-lims-mobile-view';
 
 type Screen =
   | { kind: 'home' }
-  | { kind: 'result'; requestId: number }
+  // "result-list" (2026-08-28, WP3a) — список уже введённых серий заявки, теперь
+  // открывается ПЕРВЫМ (не сразу форма) — навигация/удаление серий только отсюда.
+  | { kind: 'result-list'; requestId: number }
+  // seriesNum отсутствует — создание новой серии; задан — правка существующей
+  // (предзаполнение её значениями, отправка тем же series_num — апсерт на месте).
+  | { kind: 'result-form'; requestId: number; seriesNum?: number }
   | { kind: 'calibrate'; equipmentId: number };
 
 /** Вьюха «ЛИМС Мобайл»: главный экран (ручной резервный ввод) + два сценария,
@@ -45,7 +50,7 @@ export class MobileLimsView extends ItemView {
   }
 
   openResult(requestId: number): void {
-    this.screen = { kind: 'result', requestId };
+    this.screen = { kind: 'result-list', requestId };
     this.render();
   }
 
@@ -68,7 +73,8 @@ export class MobileLimsView extends ItemView {
     }
     const body = el.createDiv({ cls: 'tn-lm-body' });
     if (this.screen.kind === 'home') this.renderHome(body);
-    else if (this.screen.kind === 'result') void this.renderResultScreen(body, this.screen.requestId);
+    else if (this.screen.kind === 'result-list') void this.renderResultListScreen(body, this.screen.requestId);
+    else if (this.screen.kind === 'result-form') void this.renderResultScreen(body, this.screen.requestId, this.screen.seriesNum);
     else void this.renderCalibrateScreen(body, this.screen.equipmentId);
   }
 
@@ -134,9 +140,81 @@ export class MobileLimsView extends ItemView {
     });
   }
 
+  // ---- Экран «Список серий» (2026-08-28, WP3a) ----
+
+  /** Открывается ПЕРВЫМ при входе в заявку (не сразу форма) — единственное место
+   * навигации по сериям: добавить/открыть-на-правку/удалить. «Завершить испытания» —
+   * просто закрывает экран (без смены статуса заявки, решение пользователя). */
+  private async renderResultListScreen(body: HTMLElement, requestId: number): Promise<void> {
+    const status = body.createDiv({ cls: 'tn-lm-meta', text: 'Загрузка серий…' });
+    let series: MobileResult[];
+    let requestLabel = '';
+    try {
+      const [request, results] = await Promise.all([
+        this.plugin.syncService.getRequest(requestId),
+        this.plugin.syncService.listResults(requestId),
+      ]);
+      requestLabel = request.customer_number || request.lab_number || `#${request.id}`;
+      series = results.filter(r => !r.is_statistical_row).sort((a, b) => a.series_num - b.series_num);
+    } catch (e: unknown) {
+      status.setText('');
+      this.renderRetriableError(body, errorMessage(e), () => {
+        body.empty();
+        void this.renderResultListScreen(body, requestId);
+      });
+      return;
+    }
+    status.remove();
+
+    body.createEl('h3', { text: `Заявка ${requestLabel}` });
+    const list = body.createDiv({ cls: 'tn-lm-list' });
+    if (series.length === 0) {
+      list.createDiv({ cls: 'tn-lm-meta tn-lm-mb8', text: 'Серий ещё нет.' });
+    }
+    for (const s of series) {
+      const row = list.createDiv({ cls: 'tn-lm-flex tn-lm-mb8' });
+      const summary = Object.entries(s.values)
+        .slice(0, 2)
+        .map(([k, v]) => `${k}=${Array.isArray(v) ? `${v.length} точек` : String(v)}`)
+        .join(', ');
+      const openBtn = row.createEl('button', {
+        text: `Серия ${s.series_num}${summary ? ' — ' + summary : ''}`, cls: 'tn-btn tn-btn-ghost',
+      });
+      openBtn.addEventListener('click', () => {
+        this.screen = { kind: 'result-form', requestId, seriesNum: s.series_num };
+        this.render();
+      });
+      const delBtn = row.createEl('button', { text: '🗑', cls: 'tn-btn tn-btn-ghost' });
+      delBtn.addEventListener('click', () => {
+        void (async () => {
+          if (!window.confirm(`Удалить серию ${s.series_num}? Следующие серии будут перенумерованы.`)) return;
+          try {
+            await this.plugin.syncService.deleteResultSeries(requestId, s.series_num);
+            new Notice('Серия удалена');
+            body.empty();
+            void this.renderResultListScreen(body, requestId);
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        })();
+      });
+    }
+
+    const addBtn = body.createEl('button', { text: '➕ Добавить серию', cls: 'tn-btn tn-btn-primary tn-lm-mb8' });
+    addBtn.addEventListener('click', () => {
+      this.screen = { kind: 'result-form', requestId };
+      this.render();
+    });
+    const doneBtn = body.createEl('button', { text: '✅ Завершить испытания', cls: 'tn-btn tn-btn-ghost' });
+    doneBtn.addEventListener('click', () => {
+      this.screen = { kind: 'home' };
+      this.render();
+    });
+  }
+
   // ---- Экран «Результаты испытания» ----
 
-  private async renderResultScreen(body: HTMLElement, requestId: number): Promise<void> {
+  private async renderResultScreen(body: HTMLElement, requestId: number, seriesNum?: number): Promise<void> {
     const status = body.createDiv({ cls: 'tn-lm-meta', text: 'Загрузка заявки…' });
     let method: MobileMethod | undefined;
     let requestLabel = '';
@@ -156,13 +234,33 @@ export class MobileLimsView extends ItemView {
       status.setText('');
       this.renderRetriableError(body, errorMessage(e), () => {
         body.empty();
-        void this.renderResultScreen(body, requestId);
+        void this.renderResultScreen(body, requestId, seriesNum);
       });
       return;
     }
     status.remove();
 
-    body.createEl('h3', { text: `Заявка ${requestLabel}` });
+    // Правка существующей серии (2026-08-28, WP3a) — подгружаем её значения/оборудование
+    // для предзаполнения формы. Best-effort: если не удалось (напр. серию уже удалили
+    // с другого устройства) — форма просто открывается пустой, как для новой серии.
+    let existingValues: Record<string, unknown> = {};
+    let existingEquipmentId: number | undefined;
+    if (seriesNum !== undefined) {
+      try {
+        const results = await this.plugin.syncService.listResults(requestId);
+        const existing = results.find(r => r.series_num === seriesNum && !r.is_statistical_row);
+        if (existing) {
+          existingValues = { ...existing.values };
+          existingEquipmentId = existing.equipment_id || undefined;
+        }
+      } catch (e: unknown) {
+        console.warn('ЛИМС Мобайл: не удалось загрузить серию для правки:', errorMessage(e));
+      }
+    }
+
+    body.createEl('h3', {
+      text: seriesNum !== undefined ? `Заявка ${requestLabel} — серия ${seriesNum}` : `Заявка ${requestLabel} — новая серия`,
+    });
     body.createDiv({ cls: 'tn-lm-meta tn-lm-mb8', text: `Метод: ${method.code}${method.name ? ' — ' + method.name : ''}` });
 
     const attrById = new Map(method.input_parameters.map(a => [a.id, a] as const));
@@ -176,7 +274,7 @@ export class MobileLimsView extends ItemView {
       ? method.operator_form.fields
       : method.input_parameters.map(a => ({ attribute_id: a.id, label: a.name, required: false }));
 
-    const values: Record<string, unknown> = {};
+    const values: Record<string, unknown> = existingValues;
     const systemValues: Record<string, unknown> = {};
     const form = body.createDiv({ cls: 'tn-lm-form' });
     let hasFields = false;
@@ -218,6 +316,7 @@ export class MobileLimsView extends ItemView {
           const eq = equipmentList.find(e => e.id === eqId);
           equipmentSelect.createEl('option', { attr: { value: String(eqId) }, text: eq ? (eq.code || eq.name) : `#${eqId}` });
         }
+        if (existingEquipmentId) equipmentSelect.value = String(existingEquipmentId);
       }
     } catch (e: unknown) {
       console.warn('ЛИМС Мобайл: не удалось загрузить оборудование метода:', errorMessage(e));
@@ -243,9 +342,12 @@ export class MobileLimsView extends ItemView {
             reportDate: sv('report_date'), samplesInDate: sv('samples_in_date'), expDate: sv('exp_date'),
             ambTemp: sv('amb_temp'), ambPres: sv('amb_pres'), ambMoist: sv('amb_moist'),
             equipmentId: equipmentSelect ? Number(equipmentSelect.value) : undefined,
+            seriesNum,
           });
           new Notice('Результаты отправлены');
-          this.screen = { kind: 'home' };
+          // Обратно к списку серий (не на главную) — WP3a: список серий теперь
+          // единственное место навигации, сразу видно результат добавления/правки.
+          this.screen = { kind: 'result-list', requestId };
           this.render();
         } catch (e: unknown) {
           // Значения на экране НЕ теряются (см. спеку) — просто показываем ошибку
@@ -467,6 +569,10 @@ export class MobileLimsView extends ItemView {
     else if (dataType === 'date') attrs.type = 'date';
     else if (dataType === 'time') attrs.type = 'time';
     const input = row.createEl('input', { attr: attrs, cls: 'tn-lm-input' });
+    // Предзаполнение при правке существующей серии (2026-08-28, WP3a) — values
+    // приходит уже с текущими значениями серии, см. renderResultScreen(seriesNum).
+    const existing = values[field.attribute_id];
+    if (existing !== undefined) input.value = String(existing);
     input.addEventListener('input', () => {
       const v = input.value;
       if (v === '') { delete values[field.attribute_id]; return; }
