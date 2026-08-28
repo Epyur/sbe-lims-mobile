@@ -91,7 +91,7 @@ export class LimsMobileService {
        * Не передавать при создании НОВОЙ серии — сервер сам назначит следующий. */
       seriesNum?: number;
     },
-  ): Promise<void> {
+  ): Promise<{ series_num: number }> {
     const token = await this.getToken();
     const res = await this.request({
       url: `${this.baseUrl}/api/lab/requests/${requestId}/results`,
@@ -107,6 +107,17 @@ export class LimsMobileService {
       }),
     });
     this.assertOk(res);
+    // Сервер отдаёт назначенный/сохранённый series_num в теле ответа (см. lab-service
+    // results.go handleCreateResult) — нужен вызывающему коду, чтобы после создания
+    // НОВОЙ серии (seriesNum не передавался) знать, на какой номер она легла, и не
+    // создать вторую новую серию повторным сабмитом того же экрана (2026-08-28, WP3a).
+    try {
+      const parsed = JSON.parse(res.text) as { series_num?: number };
+      return { series_num: parsed.series_num ?? (extra?.seriesNum ?? 0) };
+    } catch (e: unknown) {
+      console.warn('ЛИМС Мобайл: не JSON в ответе saveResult:', errorMessage(e));
+      return { series_num: extra?.seriesNum ?? 0 };
+    }
   }
 
   /** Список серий заявки (2026-08-28, WP3a) — для экрана «список серий» перед формой

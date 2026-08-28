@@ -5,19 +5,15 @@ import {
   CALIBRATION_SYSTEM_FIELDS, RESULT_SYSTEM_FIELDS,
 } from '../types';
 import type {
-  AttributeDataType, CalibrationAttribute, EquipmentMethodLink, MobileMethod, MobileResult, OperatorFormField,
+  AttributeDataType, CalibrationAttribute, EquipmentMethodLink, MobileEquipment, MobileMethod, MobileResult,
+  OperatorFormField,
 } from '../types';
 
 export const MOBILE_LIMS_VIEW_TYPE = 'sbe-lims-mobile-view';
 
 type Screen =
   | { kind: 'home' }
-  // "result-list" (2026-08-28, WP3a) — список уже введённых серий заявки, теперь
-  // открывается ПЕРВЫМ (не сразу форма) — навигация/удаление серий только отсюда.
-  | { kind: 'result-list'; requestId: number }
-  // seriesNum отсутствует — создание новой серии; задан — правка существующей
-  // (предзаполнение её значениями, отправка тем же series_num — апсерт на месте).
-  | { kind: 'result-form'; requestId: number; seriesNum?: number }
+  | { kind: 'result'; requestId: number }
   | { kind: 'calibrate'; equipmentId: number };
 
 /** Вьюха «ЛИМС Мобайл»: главный экран (ручной резервный ввод) + два сценария,
@@ -50,7 +46,7 @@ export class MobileLimsView extends ItemView {
   }
 
   openResult(requestId: number): void {
-    this.screen = { kind: 'result-list', requestId };
+    this.screen = { kind: 'result', requestId };
     this.render();
   }
 
@@ -73,8 +69,7 @@ export class MobileLimsView extends ItemView {
     }
     const body = el.createDiv({ cls: 'tn-lm-body' });
     if (this.screen.kind === 'home') this.renderHome(body);
-    else if (this.screen.kind === 'result-list') void this.renderResultListScreen(body, this.screen.requestId);
-    else if (this.screen.kind === 'result-form') void this.renderResultScreen(body, this.screen.requestId, this.screen.seriesNum);
+    else if (this.screen.kind === 'result') void this.renderResultScreen(body, this.screen.requestId);
     else void this.renderCalibrateScreen(body, this.screen.equipmentId);
   }
 
@@ -140,88 +135,31 @@ export class MobileLimsView extends ItemView {
     });
   }
 
-  // ---- Экран «Список серий» (2026-08-28, WP3a) ----
-
-  /** Открывается ПЕРВЫМ при входе в заявку (не сразу форма) — единственное место
-   * навигации по сериям: добавить/открыть-на-правку/удалить. «Завершить испытания» —
-   * просто закрывает экран (без смены статуса заявки, решение пользователя). */
-  private async renderResultListScreen(body: HTMLElement, requestId: number): Promise<void> {
-    const status = body.createDiv({ cls: 'tn-lm-meta', text: 'Загрузка серий…' });
-    let series: MobileResult[];
-    let requestLabel = '';
-    try {
-      const [request, results] = await Promise.all([
-        this.plugin.syncService.getRequest(requestId),
-        this.plugin.syncService.listResults(requestId),
-      ]);
-      requestLabel = request.customer_number || request.lab_number || `#${request.id}`;
-      series = results.filter(r => !r.is_statistical_row).sort((a, b) => a.series_num - b.series_num);
-    } catch (e: unknown) {
-      status.setText('');
-      this.renderRetriableError(body, errorMessage(e), () => {
-        body.empty();
-        void this.renderResultListScreen(body, requestId);
-      });
-      return;
-    }
-    status.remove();
-
-    body.createEl('h3', { text: `Заявка ${requestLabel}` });
-    const list = body.createDiv({ cls: 'tn-lm-list' });
-    if (series.length === 0) {
-      list.createDiv({ cls: 'tn-lm-meta tn-lm-mb8', text: 'Серий ещё нет.' });
-    }
-    for (const s of series) {
-      const row = list.createDiv({ cls: 'tn-lm-flex tn-lm-mb8' });
-      const summary = Object.entries(s.values)
-        .slice(0, 2)
-        .map(([k, v]) => `${k}=${Array.isArray(v) ? `${v.length} точек` : String(v)}`)
-        .join(', ');
-      const openBtn = row.createEl('button', {
-        text: `Серия ${s.series_num}${summary ? ' — ' + summary : ''}`, cls: 'tn-btn tn-btn-ghost',
-      });
-      openBtn.addEventListener('click', () => {
-        this.screen = { kind: 'result-form', requestId, seriesNum: s.series_num };
-        this.render();
-      });
-      const delBtn = row.createEl('button', { text: '🗑', cls: 'tn-btn tn-btn-ghost' });
-      delBtn.addEventListener('click', () => {
-        void (async () => {
-          if (!window.confirm(`Удалить серию ${s.series_num}? Следующие серии будут перенумерованы.`)) return;
-          try {
-            await this.plugin.syncService.deleteResultSeries(requestId, s.series_num);
-            new Notice('Серия удалена');
-            body.empty();
-            void this.renderResultListScreen(body, requestId);
-          } catch (e: unknown) {
-            new Notice(`Ошибка: ${errorMessage(e)}`);
-          }
-        })();
-      });
-    }
-
-    const addBtn = body.createEl('button', { text: '➕ Добавить серию', cls: 'tn-btn tn-btn-primary tn-lm-mb8' });
-    addBtn.addEventListener('click', () => {
-      this.screen = { kind: 'result-form', requestId };
-      this.render();
-    });
-    const doneBtn = body.createEl('button', { text: '✅ Завершить испытания', cls: 'tn-btn tn-btn-ghost' });
-    doneBtn.addEventListener('click', () => {
-      this.screen = { kind: 'home' };
-      this.render();
-    });
-  }
-
   // ---- Экран «Результаты испытания» ----
 
-  private async renderResultScreen(body: HTMLElement, requestId: number, seriesNum?: number): Promise<void> {
+  /** Одно окно на всю работу с сериями заявки (2026-08-28, WP3a; переработано в тот
+   * же день по прямой жалобе на живом использовании): раньше переключение между
+   * сериями требовало выйти из формы на отдельный экран-список и войти заново —
+   * "много лишних действий", когда испытатель в процессе работы должен часто
+   * переключаться между сериями (готовит следующий эксперимент, пока не закрыл
+   * текущий). Теперь переключатель серий и «➕ Добавить серию» — прямо в этом окне,
+   * рядом с «Отправить результаты», без единого перехода между экранами.
+   * Переключение серии = неявное сохранение текущей, если её меняли (см. switchTo
+   * ниже) — испытатель не должен терять введённое, просто заглянув в другую серию. */
+  private async renderResultScreen(body: HTMLElement, requestId: number): Promise<void> {
     const status = body.createDiv({ cls: 'tn-lm-meta', text: 'Загрузка заявки…' });
     let method: MobileMethod | undefined;
     let requestLabel = '';
+    let allSeries: MobileResult[] = [];
+    let mainEquipmentIds: number[] = [];
+    let equipmentList: MobileEquipment[] = [];
     try {
-      const [request, methods] = await Promise.all([
+      const [request, methods, results, methodEquipment, equipment] = await Promise.all([
         this.plugin.syncService.getRequest(requestId),
         this.plugin.syncService.listMethods(),
+        this.plugin.syncService.listResults(requestId),
+        this.plugin.syncService.listAllMethodEquipment(),
+        this.plugin.syncService.listEquipment(),
       ]);
       requestLabel = request.customer_number || request.lab_number || `#${request.id}`;
       method = methods.find(m => m.id === request.method_id);
@@ -230,38 +168,141 @@ export class MobileLimsView extends ItemView {
         body.createDiv({ cls: 'tn-lm-error', text: 'Метод испытаний этой заявки не найден.' });
         return;
       }
+      allSeries = results.filter(r => !r.is_statistical_row).sort((a, b) => a.series_num - b.series_num);
+      // Селектор оборудования (2026-08-28, WP1) показываем только когда у метода
+      // НЕСКОЛЬКО единиц "Основного" оборудования (иначе неоднозначно, какую
+      // калибровочную кривую брать для interpolate() — см. lab-service
+      // calibration_curve.go); при ровно одной единице сервер резолвит её сам.
+      mainEquipmentIds = methodEquipment.filter(l => l.method_id === method!.id && l.role === 'main').map(l => l.equipment_id);
+      equipmentList = equipment;
     } catch (e: unknown) {
       status.setText('');
       this.renderRetriableError(body, errorMessage(e), () => {
         body.empty();
-        void this.renderResultScreen(body, requestId, seriesNum);
+        void this.renderResultScreen(body, requestId);
       });
       return;
     }
     status.remove();
 
-    // Правка существующей серии (2026-08-28, WP3a) — подгружаем её значения/оборудование
-    // для предзаполнения формы. Best-effort: если не удалось (напр. серию уже удалили
-    // с другого устройства) — форма просто открывается пустой, как для новой серии.
-    let existingValues: Record<string, unknown> = {};
-    let existingEquipmentId: number | undefined;
-    if (seriesNum !== undefined) {
+    body.createEl('h3', { text: `Заявка ${requestLabel}` });
+    body.createDiv({ cls: 'tn-lm-meta tn-lm-mb8', text: `Метод: ${method.code}${method.name ? ' — ' + method.name : ''}` });
+
+    const switcherEl = body.createDiv({ cls: 'tn-lm-flex tn-lm-mb8' });
+    const formHost = body.createDiv();
+
+    let currentSeriesNum: number | undefined = allSeries.length > 0 ? allSeries[allSeries.length - 1].series_num : undefined;
+    /** Заполняется redrawForm() при каждой перерисовке формы — сохранение ТЕКУЩЕЙ
+     * открытой серии как явный сабмит; используется переключателем серий ниже. */
+    let currentSave: (() => Promise<number | null>) | undefined;
+    let currentIsDirty: (() => boolean) | undefined;
+
+    const refreshSeries = async (): Promise<void> => {
       try {
         const results = await this.plugin.syncService.listResults(requestId);
-        const existing = results.find(r => r.series_num === seriesNum && !r.is_statistical_row);
-        if (existing) {
-          existingValues = { ...existing.values };
-          existingEquipmentId = existing.equipment_id || undefined;
-        }
+        allSeries = results.filter(r => !r.is_statistical_row).sort((a, b) => a.series_num - b.series_num);
       } catch (e: unknown) {
-        console.warn('ЛИМС Мобайл: не удалось загрузить серию для правки:', errorMessage(e));
+        console.warn('ЛИМС Мобайл: не удалось обновить список серий:', errorMessage(e));
       }
-    }
+    };
 
-    body.createEl('h3', {
-      text: seriesNum !== undefined ? `Заявка ${requestLabel} — серия ${seriesNum}` : `Заявка ${requestLabel} — новая серия`,
+    const redrawSwitcher = (): void => {
+      switcherEl.empty();
+      for (const s of allSeries) {
+        const pillWrap = switcherEl.createDiv({ cls: 'tn-lm-flex' });
+        const pill = pillWrap.createEl('button', {
+          text: `Серия ${s.series_num}`,
+          cls: s.series_num === currentSeriesNum ? 'tn-btn tn-btn-primary' : 'tn-btn tn-btn-ghost',
+        });
+        pill.addEventListener('click', () => { void switchTo(s.series_num); });
+        const delBtn = pillWrap.createEl('button', { text: '🗑', cls: 'tn-btn tn-btn-ghost' });
+        delBtn.addEventListener('click', () => {
+          void (async () => {
+            if (!window.confirm(`Удалить серию ${s.series_num}? Следующие серии будут перенумерованы.`)) return;
+            try {
+              await this.plugin.syncService.deleteResultSeries(requestId, s.series_num);
+              new Notice('Серия удалена');
+              await refreshSeries();
+              if (currentSeriesNum === s.series_num) {
+                currentSeriesNum = allSeries.length > 0 ? allSeries[allSeries.length - 1].series_num : undefined;
+              } else if (currentSeriesNum !== undefined && currentSeriesNum > s.series_num) {
+                // Сервер перенумеровал все последующие серии на −1 (см. lab-service
+                // results.go handleDeleteResultSeries) — синхронно сдвигаем указатель.
+                currentSeriesNum -= 1;
+              }
+              redrawSwitcher();
+              redrawForm();
+            } catch (e: unknown) {
+              new Notice(`Ошибка: ${errorMessage(e)}`);
+            }
+          })();
+        });
+      }
+    };
+
+    const redrawForm = (): void => {
+      formHost.empty();
+      const existing = allSeries.find(s => s.series_num === currentSeriesNum);
+      const api = this.renderResultForm(formHost, requestId, method!, currentSeriesNum, existing, mainEquipmentIds, equipmentList, {
+        onAddNew: () => { void switchTo(undefined); },
+        onSeriesSaved: (savedNum) => {
+          void (async () => {
+            await refreshSeries();
+            currentSeriesNum = savedNum;
+            redrawSwitcher();
+          })();
+        },
+      });
+      currentSave = api.save;
+      currentIsDirty = api.isDirty;
+    };
+
+    /** Переключение на другую серию/на новую — сначала неявно сохраняет текущую
+     * форму, если её меняли (те же данные, что «Отправить результаты»). Если
+     * сохранение не удалось (ошибка валидации/сети) — переключение отменяется,
+     * ошибка уже показана в форме, испытатель остаётся на месте и может исправить. */
+    const switchTo = async (target: number | undefined): Promise<void> => {
+      if (target === currentSeriesNum) return;
+      if (currentIsDirty?.() && currentSave) {
+        const saved = await currentSave();
+        if (saved === null) return;
+      }
+      currentSeriesNum = target;
+      redrawSwitcher();
+      redrawForm();
+    };
+
+    redrawSwitcher();
+    redrawForm();
+
+    // «Завершить испытания» — просто закрывает экран, без смены статуса заявки
+    // (решение пользователя, WP3a); перед закрытием так же неявно сохраняет
+    // текущую серию, если её меняли, — та же логика, что у switchTo.
+    const doneBtn = body.createEl('button', { text: '✅ Завершить испытания', cls: 'tn-btn tn-btn-ghost tn-lm-mt8' });
+    doneBtn.addEventListener('click', () => {
+      void (async () => {
+        if (currentIsDirty?.() && currentSave) {
+          const saved = await currentSave();
+          if (saved === null) return;
+        }
+        this.screen = { kind: 'home' };
+        this.render();
+      })();
     });
-    body.createDiv({ cls: 'tn-lm-meta tn-lm-mb8', text: `Метод: ${method.code}${method.name ? ' — ' + method.name : ''}` });
+  }
+
+  /** Форма ввода одной серии — рендерится внутри renderResultScreen (см. выше).
+   * Возвращает save()/isDirty() наружу, чтобы переключатель серий мог неявно
+   * сохранить форму перед переходом на другую серию. */
+  private renderResultForm(
+    body: HTMLElement, requestId: number, method: MobileMethod, initialSeriesNum: number | undefined,
+    existingSeries: MobileResult | undefined, mainEquipmentIds: number[], equipmentList: MobileEquipment[],
+    callbacks: { onAddNew: () => void; onSeriesSaved: (seriesNum: number) => void },
+  ): { save: () => Promise<number | null>; isDirty: () => boolean } {
+    let seriesNum = initialSeriesNum;
+    const titleEl = body.createDiv({
+      cls: 'tn-lm-meta tn-lm-mb8', text: seriesNum !== undefined ? `Серия ${seriesNum}` : 'Новая серия',
+    });
 
     const attrById = new Map(method.input_parameters.map(a => [a.id, a] as const));
     // Системные поля (2026-08-27) — те же id, что requests.report_date/
@@ -274,9 +315,12 @@ export class MobileLimsView extends ItemView {
       ? method.operator_form.fields
       : method.input_parameters.map(a => ({ attribute_id: a.id, label: a.name, required: false }));
 
-    const values: Record<string, unknown> = existingValues;
+    const values: Record<string, unknown> = existingSeries ? { ...existingSeries.values } : {};
     const systemValues: Record<string, unknown> = {};
     const form = body.createDiv({ cls: 'tn-lm-form' });
+    let dirty = false;
+    form.addEventListener('input', () => { dirty = true; });
+    form.addEventListener('change', () => { dirty = true; });
     let hasFields = false;
     for (const field of fields) {
       const sys = systemById.get(field.attribute_id);
@@ -292,72 +336,72 @@ export class MobileLimsView extends ItemView {
     }
     if (!hasFields) {
       body.createDiv({ cls: 'tn-lm-meta', text: 'Для этого метода не настроены поля ввода — обратитесь к администратору.' });
-      return;
+      return { save: async () => null, isDirty: () => false };
     }
 
-    // Селектор оборудования (2026-08-28, WP1) — только когда у метода НЕСКОЛЬКО единиц
-    // "Основного" оборудования (иначе неоднозначно, какую калибровочную кривую брать
-    // для interpolate() — см. lab-service calibration_curve.go); при ровно одной единице
-    // сервер резолвит её сам, поле не показывается вовсе.
     let equipmentSelect: HTMLSelectElement | undefined;
-    try {
-      const [methodEquipment, equipmentList] = await Promise.all([
-        this.plugin.syncService.listAllMethodEquipment(),
-        this.plugin.syncService.listEquipment(),
-      ]);
-      const mainEquipmentIds = methodEquipment
-        .filter(l => l.method_id === method!.id && l.role === 'main')
-        .map(l => l.equipment_id);
-      if (mainEquipmentIds.length > 1) {
-        const eqRow = body.createDiv({ cls: 'tn-lm-field' });
-        eqRow.createEl('label', { cls: 'tn-lm-label', text: 'Оборудование *' });
-        equipmentSelect = eqRow.createEl('select', { cls: 'tn-lm-input' });
-        for (const eqId of mainEquipmentIds) {
-          const eq = equipmentList.find(e => e.id === eqId);
-          equipmentSelect.createEl('option', { attr: { value: String(eqId) }, text: eq ? (eq.code || eq.name) : `#${eqId}` });
-        }
-        if (existingEquipmentId) equipmentSelect.value = String(existingEquipmentId);
+    if (mainEquipmentIds.length > 1) {
+      const eqRow = body.createDiv({ cls: 'tn-lm-field' });
+      eqRow.createEl('label', { cls: 'tn-lm-label', text: 'Оборудование *' });
+      equipmentSelect = eqRow.createEl('select', { cls: 'tn-lm-input' });
+      for (const eqId of mainEquipmentIds) {
+        const eq = equipmentList.find(e => e.id === eqId);
+        equipmentSelect.createEl('option', { attr: { value: String(eqId) }, text: eq ? (eq.code || eq.name) : `#${eqId}` });
       }
-    } catch (e: unknown) {
-      console.warn('ЛИМС Мобайл: не удалось загрузить оборудование метода:', errorMessage(e));
+      if (existingSeries?.equipment_id) equipmentSelect.value = String(existingSeries.equipment_id);
+      equipmentSelect.addEventListener('change', () => { dirty = true; });
     }
 
     let photoBeforeUrl = '';
     let photoAfterUrl = '';
-    this.renderPhotoUploadPicker(body, 'Фото до испытания', requestId, (url) => { photoBeforeUrl = url; });
-    this.renderPhotoUploadPicker(body, 'Фото после испытания', requestId, (url) => { photoAfterUrl = url; });
+    this.renderPhotoUploadPicker(body, 'Фото до испытания', requestId, (url) => { photoBeforeUrl = url; dirty = true; });
+    this.renderPhotoUploadPicker(body, 'Фото после испытания', requestId, (url) => { photoAfterUrl = url; dirty = true; });
 
     const errDiv = body.createDiv({ cls: 'tn-lm-error tn-lm-mt8' });
-    const submitBtn = body.createEl('button', { text: 'Отправить результаты', cls: 'tn-btn tn-btn-primary tn-lm-mt8' });
+    // Кнопки рядом (2026-08-28, живая жалоба пользователя): «Добавить серию» —
+    // прямо рядом с «Отправить результаты», без выхода из формы.
+    const btnRow = body.createDiv({ cls: 'tn-lm-flex tn-lm-mt8' });
+    const submitBtn = btnRow.createEl('button', { text: 'Отправить результаты', cls: 'tn-btn tn-btn-primary' });
+    const addNewBtn = btnRow.createEl('button', { text: '➕ Добавить серию', cls: 'tn-btn tn-btn-ghost' });
+    addNewBtn.addEventListener('click', () => callbacks.onAddNew());
+
     const methodId = method.id;
+    const doSave = async (): Promise<number | null> => {
+      errDiv.setText('');
+      if (equipmentSelect && !equipmentSelect.value) { errDiv.setText('Выберите оборудование'); return null; }
+      submitBtn.setAttr('disabled', 'true');
+      try {
+        const sv = (id: string): string | undefined => systemValues[id] === undefined ? undefined : String(systemValues[id]);
+        const saved = await this.plugin.syncService.saveResult(requestId, methodId, values, {
+          photoBefore: photoBeforeUrl, photoAfter: photoAfterUrl,
+          reportDate: sv('report_date'), samplesInDate: sv('samples_in_date'), expDate: sv('exp_date'),
+          ambTemp: sv('amb_temp'), ambPres: sv('amb_pres'), ambMoist: sv('amb_moist'),
+          equipmentId: equipmentSelect ? Number(equipmentSelect.value) : undefined,
+          seriesNum,
+        });
+        dirty = false;
+        seriesNum = saved.series_num;
+        titleEl.setText(`Серия ${seriesNum}`);
+        callbacks.onSeriesSaved(seriesNum);
+        return seriesNum;
+      } catch (e: unknown) {
+        // Значения на экране НЕ теряются (см. спеку) — просто показываем ошибку
+        // и оставляем кнопку доступной для повтора.
+        errDiv.setText(`Не удалось отправить: ${errorMessage(e)}. Значения сохранены на экране — можно повторить.`);
+        return null;
+      } finally {
+        submitBtn.removeAttribute('disabled');
+      }
+    };
+
     submitBtn.addEventListener('click', () => {
       void (async () => {
-        errDiv.setText('');
-        if (equipmentSelect && !equipmentSelect.value) { errDiv.setText('Выберите оборудование'); return; }
-        submitBtn.setAttr('disabled', 'true');
-        try {
-          const sv = (id: string): string | undefined => systemValues[id] === undefined ? undefined : String(systemValues[id]);
-          await this.plugin.syncService.saveResult(requestId, methodId, values, {
-            photoBefore: photoBeforeUrl, photoAfter: photoAfterUrl,
-            reportDate: sv('report_date'), samplesInDate: sv('samples_in_date'), expDate: sv('exp_date'),
-            ambTemp: sv('amb_temp'), ambPres: sv('amb_pres'), ambMoist: sv('amb_moist'),
-            equipmentId: equipmentSelect ? Number(equipmentSelect.value) : undefined,
-            seriesNum,
-          });
-          new Notice('Результаты отправлены');
-          // Обратно к списку серий (не на главную) — WP3a: список серий теперь
-          // единственное место навигации, сразу видно результат добавления/правки.
-          this.screen = { kind: 'result-list', requestId };
-          this.render();
-        } catch (e: unknown) {
-          // Значения на экране НЕ теряются (см. спеку) — просто показываем ошибку
-          // и оставляем кнопку доступной для повтора.
-          errDiv.setText(`Не удалось отправить: ${errorMessage(e)}. Значения сохранены на экране — можно повторить.`);
-        } finally {
-          submitBtn.removeAttribute('disabled');
-        }
+        const savedNum = await doSave();
+        if (savedNum !== null) new Notice('Результаты отправлены');
       })();
     });
+
+    return { save: doSave, isDirty: () => dirty };
   }
 
   // ---- Экран «Калибровка оборудования» ----
