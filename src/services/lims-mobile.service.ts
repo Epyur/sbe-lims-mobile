@@ -1,7 +1,7 @@
 import { requestUrl, RequestUrlParam } from 'obsidian';
 import { getService } from '../../../../.obsidian/plugins/sbe-core/src/bridge';
 import { errorMessage } from '../../../../.obsidian/plugins/sbe-core/src/utils/errors';
-import type { EquipmentMethodLink, MobileEquipment, MobileMethod, MobileRequest } from '../types';
+import type { EquipmentMethodLink, MethodEquipmentLink, MobileEquipment, MobileMethod, MobileRequest } from '../types';
 
 /** Клиент lab-service для мобильного ввода — узкое подмножество вызовов, тот же
  * паттерн, что sbe-lims/src/services/sync.service.ts (getToken через мост ЦУП,
@@ -80,6 +80,10 @@ export class LimsMobileService {
       photoBefore?: string; photoAfter?: string;
       reportDate?: string; samplesInDate?: string; expDate?: string;
       ambTemp?: string; ambPres?: string; ambMoist?: string;
+      /** На каком экземпляре оборудования выполнено измерение (2026-08-28, WP1) —
+       * только когда у метода больше одной единицы "Основного" оборудования, см.
+       * mobile-lims-view.ts renderResultScreen/listAllMethodEquipment. */
+      equipmentId?: number;
     },
   ): Promise<void> {
     const token = await this.getToken();
@@ -92,9 +96,30 @@ export class LimsMobileService {
         photo_before: extra?.photoBefore || '', photo_after: extra?.photoAfter || '',
         report_date: extra?.reportDate || '', samples_in_date: extra?.samplesInDate || '', exp_date: extra?.expDate || '',
         amb_temp: extra?.ambTemp || '', amb_pres: extra?.ambPres || '', amb_moist: extra?.ambMoist || '',
+        equipment_id: extra?.equipmentId,
       }),
     });
     this.assertOk(res);
+  }
+
+  /** Вся таблица method_equipment одним запросом (2026-08-28, WP1) — нужно узнать,
+   * сколько единиц "Основного" оборудования у метода заявки (показывать ли селектор
+   * оборудования в форме результатов испытания). */
+  async listAllMethodEquipment(): Promise<MethodEquipmentLink[]> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/method-equipment`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as { links?: MethodEquipmentLink[] };
+      return Array.isArray(data.links) ? data.links : [];
+    } catch (e: unknown) {
+      console.warn('ЛИМС Мобайл: не JSON в ответе method-equipment:', errorMessage(e));
+      return [];
+    }
   }
 
   /** Загружает фото (или любой файл) в S3 через lab-service, возвращает

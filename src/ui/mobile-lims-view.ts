@@ -197,6 +197,32 @@ export class MobileLimsView extends ItemView {
       return;
     }
 
+    // Селектор оборудования (2026-08-28, WP1) — только когда у метода НЕСКОЛЬКО единиц
+    // "Основного" оборудования (иначе неоднозначно, какую калибровочную кривую брать
+    // для interpolate() — см. lab-service calibration_curve.go); при ровно одной единице
+    // сервер резолвит её сам, поле не показывается вовсе.
+    let equipmentSelect: HTMLSelectElement | undefined;
+    try {
+      const [methodEquipment, equipmentList] = await Promise.all([
+        this.plugin.syncService.listAllMethodEquipment(),
+        this.plugin.syncService.listEquipment(),
+      ]);
+      const mainEquipmentIds = methodEquipment
+        .filter(l => l.method_id === method!.id && l.role === 'main')
+        .map(l => l.equipment_id);
+      if (mainEquipmentIds.length > 1) {
+        const eqRow = body.createDiv({ cls: 'tn-lm-field' });
+        eqRow.createEl('label', { cls: 'tn-lm-label', text: 'Оборудование *' });
+        equipmentSelect = eqRow.createEl('select', { cls: 'tn-lm-input' });
+        for (const eqId of mainEquipmentIds) {
+          const eq = equipmentList.find(e => e.id === eqId);
+          equipmentSelect.createEl('option', { attr: { value: String(eqId) }, text: eq ? (eq.code || eq.name) : `#${eqId}` });
+        }
+      }
+    } catch (e: unknown) {
+      console.warn('ЛИМС Мобайл: не удалось загрузить оборудование метода:', errorMessage(e));
+    }
+
     let photoBeforeUrl = '';
     let photoAfterUrl = '';
     this.renderPhotoUploadPicker(body, 'Фото до испытания', requestId, (url) => { photoBeforeUrl = url; });
@@ -208,6 +234,7 @@ export class MobileLimsView extends ItemView {
     submitBtn.addEventListener('click', () => {
       void (async () => {
         errDiv.setText('');
+        if (equipmentSelect && !equipmentSelect.value) { errDiv.setText('Выберите оборудование'); return; }
         submitBtn.setAttr('disabled', 'true');
         try {
           const sv = (id: string): string | undefined => systemValues[id] === undefined ? undefined : String(systemValues[id]);
@@ -215,6 +242,7 @@ export class MobileLimsView extends ItemView {
             photoBefore: photoBeforeUrl, photoAfter: photoAfterUrl,
             reportDate: sv('report_date'), samplesInDate: sv('samples_in_date'), expDate: sv('exp_date'),
             ambTemp: sv('amb_temp'), ambPres: sv('amb_pres'), ambMoist: sv('amb_moist'),
+            equipmentId: equipmentSelect ? Number(equipmentSelect.value) : undefined,
           });
           new Notice('Результаты отправлены');
           this.screen = { kind: 'home' };
@@ -300,12 +328,18 @@ export class MobileLimsView extends ItemView {
       hasFields = true;
       this.renderFormField(form, field, attr?.data_type || 'text', values);
     }
+    // БАГ (2026-08-28, живая жалоба пользователя — форма калибровки метода РП
+    // пустая на планшете): раньше здесь был return, если у метода нет
+    // calibration_attributes — из-за этого условия среды (ниже) и кнопка
+    // «Сохранить» тоже никогда не рендерились, хотя по дизайну они ВСЕГДА
+    // доступны, независимо от наличия настроенных атрибутов метода (см.
+    // комментарий у CALIBRATION_SYSTEM_FIELDS). Теперь — просто заметка, форма
+    // продолжает рендериться дальше (env-поля + фото + submit).
     if (!hasFields) {
       body.createDiv({
-        cls: 'tn-lm-meta',
-        text: 'Для этого метода не настроены атрибуты калибровки — обратитесь к администратору.',
+        cls: 'tn-lm-meta tn-lm-mb8',
+        text: 'Для этого метода не настроены дополнительные атрибуты калибровки — доступны только общие поля ниже.',
       });
-      return;
     }
 
     // Условия среды при калибровке (2026-08-27) — сервер принимает их как
@@ -418,6 +452,15 @@ export class MobileLimsView extends ItemView {
     });
     if (field.help_text) row.createDiv({ cls: 'tn-lm-help', text: field.help_text });
 
+    // "curve" (2026-08-28, WP1) — только у calibration_attributes: набор точек x→y
+    // (напр. калибровочная кривая расстояние→тепловой поток метода РП), не одно число —
+    // список строк с +/− вместо <input>. Никогда не встречается у обычных атрибутов
+    // метода (input_parameters), поэтому results-форма этот путь не задействует.
+    if (dataType === 'curve') {
+      this.renderCurvePointsField(row, field.attribute_id, values);
+      return;
+    }
+
     const attrs: Record<string, string> = { type: 'text' };
     if (dataType === 'int') { attrs.type = 'number'; attrs.step = '1'; }
     else if (dataType === 'float') { attrs.type = 'number'; attrs.step = 'any'; }
@@ -429,6 +472,42 @@ export class MobileLimsView extends ItemView {
       if (v === '') { delete values[field.attribute_id]; return; }
       values[field.attribute_id] = (dataType === 'int' || dataType === 'float') ? Number(v) : v;
     });
+  }
+
+  /** Список точек калибровочной кривой (2026-08-28, WP1) — мобильный аналог
+   * renderCurvePointsField в десктопном lims-view.ts: строка = два числовых поля
+   * (x/y) + «−», плюс кнопка «+ Точка». Стартует с двух пустых строк (минимум для
+   * линейной интерполяции). Пустые/нечисловые строки не попадают в values при
+   * отправке формы — испытателю не нужно чистить недописанные точки. */
+  private renderCurvePointsField(container: HTMLElement, attributeId: string, values: Record<string, unknown>): void {
+    const rowsEl = container.createDiv();
+    const rows: Array<{ x: HTMLInputElement; y: HTMLInputElement }> = [];
+    const sync = (): void => {
+      const points = rows
+        .map(r => ({ x: parseFloat(r.x.value), y: parseFloat(r.y.value) }))
+        .filter(p => !Number.isNaN(p.x) && !Number.isNaN(p.y));
+      if (points.length > 0) values[attributeId] = points;
+      else delete values[attributeId];
+    };
+    const addRow = (): void => {
+      const row = rowsEl.createDiv({ cls: 'tn-lm-flex' });
+      const x = row.createEl('input', { attr: { type: 'number', placeholder: 'x' }, cls: 'tn-lm-input' });
+      const y = row.createEl('input', { attr: { type: 'number', placeholder: 'y' }, cls: 'tn-lm-input' });
+      x.addEventListener('input', sync);
+      y.addEventListener('input', sync);
+      const rm = row.createEl('button', { text: '−', cls: 'tn-btn tn-btn-ghost' });
+      rm.addEventListener('click', () => {
+        row.remove();
+        const i = rows.findIndex(r => r.x === x);
+        if (i >= 0) rows.splice(i, 1);
+        sync();
+      });
+      rows.push({ x, y });
+    };
+    addRow();
+    addRow();
+    const addBtn = container.createEl('button', { text: '+ Точка', cls: 'tn-btn tn-btn-ghost tn-lm-mb8' });
+    addBtn.addEventListener('click', addRow);
   }
 
   private renderRetriableError(body: HTMLElement, message: string, retry: () => void): void {

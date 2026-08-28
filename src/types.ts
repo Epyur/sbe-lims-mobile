@@ -2,7 +2,9 @@
  * (не общий пакет с sbe-lims — маленькое дублирование дешевле, чем зависимость
  * между репозиториями, см. spec «Границы»). */
 
-export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo';
+// "curve" (2026-08-28, WP1) — только у calibration_attributes: набор точек x→y
+// (калибровочная кривая), не одно число, см. mobile-lims-view.ts renderCurvePointsField.
+export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'curve';
 
 export interface OperatorFormField {
   attribute_id: string;
@@ -58,6 +60,16 @@ export interface MobileEquipment {
 
 export interface EquipmentMethodLink {
   method_id: number;
+  role: 'main' | 'auxiliary';
+}
+
+/** Одна строка ВСЕЙ таблицы method_equipment (GET /method-equipment, 2026-08-28, WP1) —
+ * в отличие от EquipmentMethodLink (уже привязан к одному equipment_id через URL), здесь
+ * equipment_id — часть самой записи: нужно узнать все единицы оборудования КОНКРЕТНОГО
+ * метода, а не наоборот. */
+export interface MethodEquipmentLink {
+  method_id: number;
+  equipment_id: number;
   role: 'main' | 'auxiliary';
 }
 
