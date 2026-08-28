@@ -90,6 +90,13 @@ export class LimsMobileService {
        * апсертит по (request_id, method_id, series_num), новый эндпоинт не нужен.
        * Не передавать при создании НОВОЙ серии — сервер сам назначит следующий. */
       seriesNum?: number;
+      /** Hash данных от внешнего прибора (2026-08-28, WP3d) — испытатель
+       * переписывает его с экрана/QR прибора (TDT Reader и т.п.); сервер
+       * атомарно заявляет `instrument_result_buffer` по hash и домешивает его
+       * values В values ЭТОЙ серии (см. lab-service handleCreateResult/
+       * claimInstrumentBuffer — вручную введённое приоритетнее). Одноразовый:
+       * повторная отправка того же hash вернёт ошибку "не найден/уже использован". */
+      instrumentHash?: string;
     },
   ): Promise<{ series_num: number }> {
     const token = await this.getToken();
@@ -104,6 +111,7 @@ export class LimsMobileService {
         amb_temp: extra?.ambTemp || '', amb_pres: extra?.ambPres || '', amb_moist: extra?.ambMoist || '',
         equipment_id: extra?.equipmentId,
         series_num: extra?.seriesNum,
+        instrument_hash: extra?.instrumentHash || '',
       }),
     });
     this.assertOk(res);

@@ -300,9 +300,24 @@ export class MobileLimsView extends ItemView {
     callbacks: { onAddNew: () => void; onSeriesSaved: (seriesNum: number) => void },
   ): { save: () => Promise<number | null>; isDirty: () => boolean } {
     let seriesNum = initialSeriesNum;
+    let dirty = false;
     const titleEl = body.createDiv({
       cls: 'tn-lm-meta tn-lm-mb8', text: seriesNum !== undefined ? `Серия ${seriesNum}` : 'Новая серия',
     });
+
+    // Hash от прибора (2026-08-28, WP3d — последний некодированный кусочек:
+    // буфер/claim на сервере уже полностью готов и задеплоен, см.
+    // lab-service/AGENTS.md "Буфер результатов приборов"). Испытатель
+    // переписывает hash с экрана/QR прибора (TDT Reader и т.п.) сюда — сервер
+    // атомарно заявляет буфер по hash и домешивает его values В values этой
+    // серии (вручную введённое приоритетнее, см. handleCreateResult); поле
+    // необязательное — методы без прибора его просто не трогают.
+    const hashRow = body.createDiv({ cls: 'tn-lm-field' });
+    hashRow.createEl('label', { cls: 'tn-lm-label', text: 'Hash от прибора (опционально)' });
+    const hashInput = hashRow.createEl('input', {
+      attr: { type: 'text', placeholder: 'Вставьте hash с экрана/QR прибора' }, cls: 'tn-lm-input',
+    });
+    hashInput.addEventListener('input', () => { dirty = true; });
 
     const attrById = new Map(method.input_parameters.map(a => [a.id, a] as const));
     // Системные поля (2026-08-27) — те же id, что requests.report_date/
@@ -318,7 +333,6 @@ export class MobileLimsView extends ItemView {
     const values: Record<string, unknown> = existingSeries ? { ...existingSeries.values } : {};
     const systemValues: Record<string, unknown> = {};
     const form = body.createDiv({ cls: 'tn-lm-form' });
-    let dirty = false;
     form.addEventListener('input', () => { dirty = true; });
     form.addEventListener('change', () => { dirty = true; });
     let hasFields = false;
@@ -377,9 +391,14 @@ export class MobileLimsView extends ItemView {
           reportDate: sv('report_date'), samplesInDate: sv('samples_in_date'), expDate: sv('exp_date'),
           ambTemp: sv('amb_temp'), ambPres: sv('amb_pres'), ambMoist: sv('amb_moist'),
           equipmentId: equipmentSelect ? Number(equipmentSelect.value) : undefined,
+          instrumentHash: hashInput.value.trim() || undefined,
           seriesNum,
         });
         dirty = false;
+        // Hash одноразовый (сервер помечает его использованным при успешном claim,
+        // см. claimInstrumentBuffer) — очищаем поле, чтобы случайный повторный
+        // сабмит/автосохранение при переключении серии не пытался занять его снова.
+        hashInput.value = '';
         seriesNum = saved.series_num;
         titleEl.setText(`Серия ${seriesNum}`);
         callbacks.onSeriesSaved(seriesNum);
