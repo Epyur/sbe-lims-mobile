@@ -63,6 +63,9 @@ export interface MobileResult {
   values: Record<string, unknown>;
   equipment_id: number;
   is_statistical_row: boolean;
+  /** Фоллбэк для day-check WP3b (2026-08-28) — если у серии не заполнено
+   * values.exp_date, сравнение "тот же день?" берёт дату этой создания. */
+  created_at: string;
 }
 
 export interface MobileEquipment {

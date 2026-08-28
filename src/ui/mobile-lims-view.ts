@@ -11,6 +11,24 @@ import type {
 
 export const MOBILE_LIMS_VIEW_TYPE = 'sbe-lims-mobile-view';
 
+/** "YYYY-MM-DD" по ЛОКАЛЬНОЙ дате устройства (2026-08-28, WP3b) — испытатель
+ * физически рядом с образцом, локальное время устройства и есть время
+ * эксперимента, часовой пояс сервера не участвует в сравнении "тот же день". */
+function todayLocalDateString(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** Локальная календарная дата ISO-таймстампа (у него есть часовой пояс, "Z"/±HH:MM)
+ * — НЕ применять к exp_date/report_date самим по себе: это уже голая "YYYY-MM-DD"
+ * без времени, гнать её через Date() рискованно (UTC-полночь при парсинге строки
+ * без времени может съехать на соседний день после конвертации в локальный часовой
+ * пояс устройства). Только для created_at (реальный timestamp с сервера). */
+function localDateOfTimestamp(iso: string): string {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 type Screen =
   | { kind: 'home' }
   | { kind: 'result'; requestId: number }
@@ -197,6 +215,22 @@ export class MobileLimsView extends ItemView {
     let currentSave: (() => Promise<number | null>) | undefined;
     let currentIsDirty: (() => boolean) | undefined;
 
+    // Системные поля (дата/условия среды) для НОВОЙ серии (2026-08-28, WP3b) —
+    // показываются только если это первая серия заявки или день изменился с
+    // последней серии (exp_date, фоллбэк на created_at) — испытания одной
+    // заявки могут идти в разные дни с разными условиями среды, но если это
+    // тот же день, повторно спрашивать нечего. Вычисляется ОДИН раз при входе
+    // в заявку — день не меняется, пока открыт экран. Не влияет на правку УЖЕ
+    // существующей серии — там системные поля показываются всегда (см.
+    // renderResultForm), это правило только про создание новой.
+    const lastSeries = allSeries.length > 0 ? allSeries[allSeries.length - 1] : undefined;
+    const lastSeriesDay = lastSeries
+      ? (typeof lastSeries.values.exp_date === 'string' && lastSeries.values.exp_date
+        ? lastSeries.values.exp_date
+        : localDateOfTimestamp(lastSeries.created_at))
+      : undefined;
+    const shouldShowSystemFieldsForNewSeries = !lastSeriesDay || lastSeriesDay !== todayLocalDateString();
+
     const refreshSeries = async (): Promise<void> => {
       try {
         const results = await this.plugin.syncService.listResults(requestId);
@@ -243,16 +277,20 @@ export class MobileLimsView extends ItemView {
     const redrawForm = (): void => {
       formHost.empty();
       const existing = allSeries.find(s => s.series_num === currentSeriesNum);
-      const api = this.renderResultForm(formHost, requestId, method!, currentSeriesNum, existing, mainEquipmentIds, equipmentList, {
-        onAddNew: () => { void switchTo(undefined); },
-        onSeriesSaved: (savedNum) => {
-          void (async () => {
-            await refreshSeries();
-            currentSeriesNum = savedNum;
-            redrawSwitcher();
-          })();
+      const api = this.renderResultForm(
+        formHost, requestId, method!, currentSeriesNum, existing, mainEquipmentIds, equipmentList,
+        shouldShowSystemFieldsForNewSeries,
+        {
+          onAddNew: () => { void switchTo(undefined); },
+          onSeriesSaved: (savedNum) => {
+            void (async () => {
+              await refreshSeries();
+              currentSeriesNum = savedNum;
+              redrawSwitcher();
+            })();
+          },
         },
-      });
+      );
       currentSave = api.save;
       currentIsDirty = api.isDirty;
     };
@@ -297,6 +335,7 @@ export class MobileLimsView extends ItemView {
   private renderResultForm(
     body: HTMLElement, requestId: number, method: MobileMethod, initialSeriesNum: number | undefined,
     existingSeries: MobileResult | undefined, mainEquipmentIds: number[], equipmentList: MobileEquipment[],
+    shouldShowSystemFieldsForNewSeries: boolean,
     callbacks: { onAddNew: () => void; onSeriesSaved: (seriesNum: number) => void },
   ): { save: () => Promise<number | null>; isDirty: () => boolean } {
     let seriesNum = initialSeriesNum;
@@ -320,18 +359,44 @@ export class MobileLimsView extends ItemView {
     hashInput.addEventListener('input', () => { dirty = true; });
 
     const attrById = new Map(method.input_parameters.map(a => [a.id, a] as const));
-    // Системные поля (2026-08-27) — те же id, что requests.report_date/
-    // samples_in_date/exp_date/amb_temp/amb_pres/amb_moist; попадают в форму,
-    // только если админ явно добавил их в operator_form.fields конфигуратора
-    // (см. sbe-lims OPERATOR_FORM_SYSTEM_FIELDS) — значения идут отдельно от
-    // values (это колонки requests, не JSONB атрибуты метода).
+    // Системные поля (2026-08-27; per-series с 2026-08-28, WP3b) — те же id, что
+    // report_date/samples_in_date/exp_date/amb_temp/amb_pres/amb_moist; попадают
+    // в форму, только если админ явно добавил их в operator_form.fields
+    // конфигуратора (см. sbe-lims OPERATOR_FORM_SYSTEM_FIELDS). Раньше хранились
+    // отдельно от values (колонки requests, общие на всю заявку) — теперь лежат
+    // прямо В values серии (сервер сам это делает, см. lab-service
+    // handleCreateResult), клиент шлёт их теми же именованными полями тела
+    // запроса, что и раньше (см. doSave ниже) — просто читает их обратно из
+    // ОДНОГО и того же values при предзаполнении правки, без отдельного места.
     const systemById = new Map(RESULT_SYSTEM_FIELDS.map(s => [s.id, s] as const));
     const fields: OperatorFormField[] = method.operator_form.fields.length > 0
       ? method.operator_form.fields
       : method.input_parameters.map(a => ({ attribute_id: a.id, label: a.name, required: false }));
 
-    const values: Record<string, unknown> = existingSeries ? { ...existingSeries.values } : {};
+    // Разложить existingSeries.values по двум клиентским корзинам — системные
+    // поля отдельно (systemValues), остальное — обычные атрибуты метода
+    // (values); на wire эти два бакета до сих пор сериализуются по-разному
+    // (см. doSave: report_date и т.п. — отдельные именованные поля тела
+    // запроса, values — JSONB атрибутов), хотя сервер хранит их вместе.
+    const values: Record<string, unknown> = {};
     const systemValues: Record<string, unknown> = {};
+    if (existingSeries) {
+      for (const [k, v] of Object.entries(existingSeries.values)) {
+        (systemById.has(k) ? systemValues : values)[k] = v;
+      }
+    }
+    // Показ системных полей для НОВОЙ серии (2026-08-28, WP3b) — только если день
+    // изменился с последней серии (см. renderResultScreen); при правке
+    // СУЩЕСТВУЮЩЕЙ серии — всегда, это её собственные уже сохранённые значения.
+    const showSystemFields = existingSeries !== undefined || shouldShowSystemFieldsForNewSeries;
+    // Дефолт "сегодня" для дат — только когда поле реально показывается для
+    // НОВОЙ серии (не при правке — там значение уже есть или его сознательно
+    // не было). amb_temp/amb_pres/amb_moist — без дефолта, нет осмысленного.
+    if (showSystemFields && !existingSeries) {
+      const today = todayLocalDateString();
+      systemValues.report_date = today;
+      systemValues.exp_date = today;
+    }
     const form = body.createDiv({ cls: 'tn-lm-form' });
     form.addEventListener('input', () => { dirty = true; });
     form.addEventListener('change', () => { dirty = true; });
@@ -339,6 +404,7 @@ export class MobileLimsView extends ItemView {
     for (const field of fields) {
       const sys = systemById.get(field.attribute_id);
       if (sys) {
+        if (!showSystemFields) continue;
         hasFields = true;
         this.renderFormField(form, { ...field, label: field.label || sys.label }, sys.data_type, systemValues);
         continue;
