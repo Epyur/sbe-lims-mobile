@@ -67,6 +67,49 @@
 
 ## История работ
 
+### 2026-08-28 — v0.1.12 (WP3c часть 1/2 — select-виджет, дефолты, условная видимость)
+
+Спека/план: `docs/superpowers/specs/2026-08-28-sbe-lims-select-defaults-visibility-design.md`
++ `-plan.md`. Конфигуратор — только десктоп (sbe-lims), мобильный получает
+готовую конфигурацию через API и просто рендерит её.
+
+- `types.ts`: `AttributeDataType` += `'select'`/`'boolean'` (раньше boolean
+  вообще отсутствовал в мобильном подмножестве типов); новый
+  `ComparisonOperator`; `MethodAttribute` += `options?`; `OperatorFormField`
+  += `default?`/`visibility?` (та же схема, что sbe-lims — см. его AGENTS.md
+  за подробным описанием решений брейнсторма).
+- `mobile-lims-view.ts` (`renderFormField`) — новая ветка `select`/`boolean`
+  (`<select>` с пустым плейсхолдером); применение `field.default` один раз
+  при рендере (не перетирает уже сохранённое при правке серии); каждая `row`
+  получает `data-attribute-id`. Новые `compareFieldCondition`/
+  `updateFieldVisibility` — НЕ переиспользуют DSL (тот только на сервере,
+  Go) — маленькие чистые функции для живого пересчёта видимости.
+  `renderResultForm`: `recomputeVisibility()` вызывается сразу после рендера
+  формы и на каждый `input`/`change`; `buildSubmitValues()` — новая функция,
+  исключает из payload значения полей, чья `row` сейчас скрыта (сам ввод в
+  `values` не теряется — просто не уходит на сервер, пока скрыт).
+- `npx tsc --noEmit -skipLibCheck` EXIT=0, `npm run build` OK. Версия 0.1.11 →
+  **0.1.12**.
+- Верификация: только tsc/build + код-ревью — backend не менялся (JSONB-конфиг,
+  сервер не парсит структурно), фича чисто клиентская, живой E2E не требовался.
+
+### 2026-08-28 — v0.1.11 (главный экран: «Последние заявки»)
+
+Прямой запрос пользователя — испытатель может параллельно готовить несколько
+заявок (например, начинать серию по одной, пока идёт испытание по другой), и
+каждый раз перепечатывать номер неудобно.
+
+- `main.ts`: `MobileLimsSettings` += `recentRequests: RecentRequest[]`
+  (`{id, label}`, локально на устройстве через `saveData`/`loadData` — не
+  синхронизируется между планшетами, "последние" осмысленны именно для
+  конкретного устройства).
+- `mobile-lims-view.ts`: `openResult` += опциональный `label` — записывает
+  заявку в начало `recentRequests` (дедуп + move-to-front, максимум 3).
+  `renderHome` — новая секция «Последние заявки» (кнопки с номером, только
+  если список не пуст) перед формой ручного ввода номера.
+- `npx tsc --noEmit -skipLibCheck` EXIT=0, `npm run build` OK. Версия 0.1.10 →
+  **0.1.11**.
+
 ### 2026-08-28 — v0.1.10 (WP3b — системные поля по дням: показ/скрытие + дефолт "сегодня")
 
 Спека/план: `docs/superpowers/specs/2026-08-28-sbe-lims-system-fields-per-series-design.md`

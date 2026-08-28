@@ -5,8 +5,8 @@ import {
   CALIBRATION_SYSTEM_FIELDS, RESULT_SYSTEM_FIELDS,
 } from '../types';
 import type {
-  AttributeDataType, CalibrationAttribute, EquipmentMethodLink, MobileEquipment, MobileMethod, MobileResult,
-  OperatorFormField,
+  AttributeDataType, CalibrationAttribute, ComparisonOperator, EquipmentMethodLink, MobileEquipment, MobileMethod,
+  MobileResult, OperatorFormField,
 } from '../types';
 
 export const MOBILE_LIMS_VIEW_TYPE = 'sbe-lims-mobile-view';
@@ -27,6 +27,40 @@ function todayLocalDateString(): string {
 function localDateOfTimestamp(iso: string): string {
   const d = new Date(iso);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** Сравнение для visibility.conditions (2026-08-28, WP3c) — НЕ переиспользует
+ * DSL/классификацию: те выполняются только на сервере (Go), тут нужна живая
+ * клиентская проверка при каждом изменении формы, поэтому — новая маленькая
+ * чистая функция. `==`/`!=` — строковое сравнение; остальные — числовое,
+ * NaN с любой стороны → условие ложно (не выбрано/не число). */
+function compareFieldCondition(actual: unknown, operator: ComparisonOperator, expected: string): boolean {
+  if (operator === '==') return String(actual ?? '') === expected;
+  if (operator === '!=') return String(actual ?? '') !== expected;
+  const a = Number(actual);
+  const b = Number(expected);
+  if (Number.isNaN(a) || Number.isNaN(b)) return false;
+  if (operator === '<') return a < b;
+  if (operator === '<=') return a <= b;
+  if (operator === '>') return a > b;
+  return a >= b; // '>='
+}
+
+/** Пересчитывает видимость всех полей формы с visibility (2026-08-28, WP3c) —
+ * скрывает/показывает через CSS display, DOM/введённое значение НЕ уничтожается
+ * (см. renderResultForm buildSubmitValues — скрытые поля просто не попадают в
+ * payload, пока скрыты, но сам ввод остаётся, если условие снова станет true). */
+function updateFieldVisibility(form: HTMLElement, fields: OperatorFormField[], values: Record<string, unknown>): void {
+  for (const field of fields) {
+    if (!field.visibility) continue;
+    const row = form.querySelector<HTMLElement>(`[data-attribute-id="${CSS.escape(field.attribute_id)}"]`);
+    if (!row) continue;
+    const { logic, conditions } = field.visibility;
+    if (conditions.length === 0) { row.style.display = ''; continue; }
+    const results = conditions.map(c => compareFieldCondition(values[c.field], c.operator, c.value));
+    const visible = logic === 'and' ? results.every(Boolean) : results.some(Boolean);
+    row.style.display = visible ? '' : 'none';
+  }
 }
 
 type Screen =
@@ -63,9 +97,23 @@ export class MobileLimsView extends ItemView {
     this.render();
   }
 
-  openResult(requestId: number): void {
+  /** label (2026-08-28) — для списка «Последние заявки» на главном экране;
+   * опционален, т.к. openResult вызывается и там, где номера ещё нет под рукой
+   * (падает на "#<id>" в этом случае). */
+  openResult(requestId: number, label?: string): void {
     this.screen = { kind: 'result', requestId };
+    this.recordRecentRequest(requestId, label || `#${requestId}`);
     this.render();
+  }
+
+  /** Последние заявки (2026-08-28) — быстрый возврат без повторного ввода
+   * номера, см. renderHome. Дедуп + move-to-front (заявка, уже бывшая в
+   * списке, просто поднимается наверх, не дублируется), максимум 3. Хранится
+   * локально на устройстве (MobileLimsSettings.recentRequests, saveData). */
+  private recordRecentRequest(id: number, label: string): void {
+    const settings = this.plugin.settings;
+    settings.recentRequests = [{ id, label }, ...settings.recentRequests.filter(r => r.id !== id)].slice(0, 3);
+    void this.plugin.saveSettings();
   }
 
   openCalibrate(equipmentId: number): void {
@@ -99,6 +147,19 @@ export class MobileLimsView extends ItemView {
       text: 'Отсканируйте QR камерой/любым QR-сканером телефона — он покажет номер заявки ' +
         'или код оборудования. Скопируйте номер и вставьте в поле ниже.',
     });
+
+    // Последние заявки (2026-08-28) — быстрый возврат без повторного ввода
+    // номера; испытатель может параллельно готовить несколько заявок, номер
+    // каждый раз перепечатывать неудобно. Только если список не пуст — на
+    // первом запуске плагина/после очистки данных секции просто нет.
+    if (this.plugin.settings.recentRequests.length > 0) {
+      body.createEl('h4', { text: 'Последние заявки' });
+      const recentRow = body.createDiv({ cls: 'tn-lm-flex tn-lm-mb8' });
+      for (const r of this.plugin.settings.recentRequests) {
+        const btn = recentRow.createEl('button', { text: r.label, cls: 'tn-btn tn-btn-ghost' });
+        btn.addEventListener('click', () => this.openResult(r.id, r.label));
+      }
+    }
 
     body.createEl('h4', { text: 'Открыть по номеру' });
     let mode: 'request' | 'equipment' = 'request';
@@ -135,7 +196,7 @@ export class MobileLimsView extends ItemView {
             const found = requests.find(r =>
               `${r.number_seq}/${r.number_year}` === q || r.customer_number === q || r.lab_number === q);
             if (!found) { errDiv.setText('Заявка не найдена по этому номеру.'); return; }
-            this.openResult(found.id);
+            this.openResult(found.id, found.customer_number || found.lab_number || `#${found.id}`);
           } else {
             const equipment = await this.plugin.syncService.listEquipment();
             const qLower = q.toLowerCase();
@@ -398,8 +459,11 @@ export class MobileLimsView extends ItemView {
       systemValues.exp_date = today;
     }
     const form = body.createDiv({ cls: 'tn-lm-form' });
-    form.addEventListener('input', () => { dirty = true; });
-    form.addEventListener('change', () => { dirty = true; });
+    // recomputeVisibility определяется НИЖЕ (после рендера полей), но
+    // вызывается только из этих обработчиков — к моменту первого реального
+    // события форма уже полностью отрисована (см. redrawForm/switchTo).
+    form.addEventListener('input', () => { dirty = true; recomputeVisibility(); });
+    form.addEventListener('change', () => { dirty = true; recomputeVisibility(); });
     let hasFields = false;
     for (const field of fields) {
       const sys = systemById.get(field.attribute_id);
@@ -412,12 +476,20 @@ export class MobileLimsView extends ItemView {
       const attr = attrById.get(field.attribute_id);
       if (attr && attr.data_type === 'photo') continue; // вне scope v1
       hasFields = true;
-      this.renderFormField(form, field, attr?.data_type || 'text', values);
+      this.renderFormField(form, field, attr?.data_type || 'text', values, attr?.options);
     }
     if (!hasFields) {
       body.createDiv({ cls: 'tn-lm-meta', text: 'Для этого метода не настроены поля ввода — обратитесь к администратору.' });
       return { save: async () => null, isDirty: () => false };
     }
+    // Условная видимость (2026-08-28, WP3c) — стартовое состояние сразу после
+    // рендера (дефолт другого поля мог уже определить видимость), затем живой
+    // пересчёт на каждое изменение формы (тот же делегированный слушатель, что
+    // уже помечает форму "грязной" — см. ниже).
+    const recomputeVisibility = (): void => {
+      updateFieldVisibility(form, fields, { ...systemValues, ...values });
+    };
+    recomputeVisibility();
 
     let equipmentSelect: HTMLSelectElement | undefined;
     if (mainEquipmentIds.length > 1) {
@@ -446,13 +518,31 @@ export class MobileLimsView extends ItemView {
     addNewBtn.addEventListener('click', () => callbacks.onAddNew());
 
     const methodId = method.id;
+    // Скрытые условной видимостью поля не уходят на сервер (2026-08-28, WP3c) —
+    // хотя их значение остаётся в values на клиенте (не теряется при повторном
+    // показе, см. recomputeVisibility выше), в payload они не попадают, пока
+    // скрыты. Пересчитывает свежее состояние displaу прямо перед сборкой —
+    // не полагается на то, что последний recomputeVisibility точно актуален.
+    const buildSubmitValues = (): Record<string, unknown> => {
+      recomputeVisibility();
+      const hidden = new Set<string>();
+      form.querySelectorAll<HTMLElement>('[data-attribute-id]').forEach((row) => {
+        if (row.style.display === 'none' && row.dataset.attributeId) hidden.add(row.dataset.attributeId);
+      });
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(values)) {
+        if (!hidden.has(k)) out[k] = v;
+      }
+      return out;
+    };
+
     const doSave = async (): Promise<number | null> => {
       errDiv.setText('');
       if (equipmentSelect && !equipmentSelect.value) { errDiv.setText('Выберите оборудование'); return null; }
       submitBtn.setAttr('disabled', 'true');
       try {
         const sv = (id: string): string | undefined => systemValues[id] === undefined ? undefined : String(systemValues[id]);
-        const saved = await this.plugin.syncService.saveResult(requestId, methodId, values, {
+        const saved = await this.plugin.syncService.saveResult(requestId, methodId, buildSubmitValues(), {
           photoBefore: photoBeforeUrl, photoAfter: photoAfterUrl,
           reportDate: sv('report_date'), samplesInDate: sv('samples_in_date'), expDate: sv('exp_date'),
           ambTemp: sv('amb_temp'), ambPres: sv('amb_pres'), ambMoist: sv('amb_moist'),
@@ -675,13 +765,24 @@ export class MobileLimsView extends ItemView {
 
   private renderFormField(
     container: HTMLElement, field: OperatorFormField, dataType: AttributeDataType, values: Record<string, unknown>,
+    options?: string[],
   ): void {
     const row = container.createDiv({ cls: 'tn-lm-field' });
+    // Для updateFieldVisibility (2026-08-28, WP3c) — находит обёртку поля по
+    // attribute_id, чтобы скрыть/показать по условию другого поля.
+    row.dataset.attributeId = field.attribute_id;
     row.createEl('label', {
       cls: 'tn-lm-label',
       text: (field.label || field.attribute_id) + (field.required ? ' *' : ''),
     });
     if (field.help_text) row.createDiv({ cls: 'tn-lm-help', text: field.help_text });
+
+    // Дефолт (2026-08-28, WP3c) — однократно при рендере, только если значения
+    // ещё нет (не перетирает уже сохранённое при правке существующей серии).
+    if (field.default && values[field.attribute_id] === undefined) {
+      if (field.default.kind === 'literal') values[field.attribute_id] = field.default.value;
+      else if (field.default.kind === 'today' && dataType === 'date') values[field.attribute_id] = todayLocalDateString();
+    }
 
     // "curve" (2026-08-28, WP1) — только у calibration_attributes: набор точек x→y
     // (напр. калибровочная кривая расстояние→тепловой поток метода РП), не одно число —
@@ -689,6 +790,24 @@ export class MobileLimsView extends ItemView {
     // метода (input_parameters), поэтому results-форма этот путь не задействует.
     if (dataType === 'curve') {
       this.renderCurvePointsField(row, field.attribute_id, values);
+      return;
+    }
+
+    // select/boolean (2026-08-28, WP3c) — constrained-choice виджет: boolean
+    // всегда ['Да','Нет'] (не нужно ничего настраивать в конфигураторе),
+    // select — из MethodAttribute.options. Пустой первый option — ничего не
+    // подставляется как "выбрано" без явного действия испытателя.
+    if (dataType === 'select' || dataType === 'boolean') {
+      const opts = dataType === 'boolean' ? ['Да', 'Нет'] : (options || []);
+      const select = row.createEl('select', { cls: 'tn-lm-input' });
+      select.createEl('option', { attr: { value: '' }, text: '— выбрать —' });
+      for (const o of opts) select.createEl('option', { attr: { value: o }, text: o });
+      const existingChoice = values[field.attribute_id];
+      if (existingChoice !== undefined) select.value = String(existingChoice);
+      select.addEventListener('change', () => {
+        if (select.value === '') { delete values[field.attribute_id]; return; }
+        values[field.attribute_id] = select.value;
+      });
       return;
     }
 

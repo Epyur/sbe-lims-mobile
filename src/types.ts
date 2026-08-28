@@ -4,13 +4,33 @@
 
 // "curve" (2026-08-28, WP1) — только у calibration_attributes: набор точек x→y
 // (калибровочная кривая), не одно число, см. mobile-lims-view.ts renderCurvePointsField.
-export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'curve';
+// "select"/"boolean" (2026-08-28, WP3c) — <select> в форме результатов, boolean —
+// тот же рендер с неявным фиксированным списком ['Да','Нет'].
+export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'curve' | 'select' | 'boolean';
+
+/** Знак сравнения — условная видимость поля формы (2026-08-28, WP3c); тот же
+ * каталог, что ComparisonOperator в sbe-lims (классификация), здесь нужен
+ * только для visibility.conditions. */
+export type ComparisonOperator = '==' | '!=' | '<' | '<=' | '>' | '>=';
 
 export interface OperatorFormField {
   attribute_id: string;
   label?: string;
   required: boolean;
   help_text?: string;
+  /** Значение по умолчанию (2026-08-28, WP3c) — без DSL: "literal" — точное
+   * значение, "today" — только для data_type="date", сегодняшняя ЛОКАЛЬНАЯ
+   * дата устройства. Применяется один раз при рендере, не переопределяет уже
+   * существующее значение (правка серии). */
+  default?: { kind: 'literal'; value: string } | { kind: 'today' };
+  /** Условная видимость (2026-08-28, WP3c) — поле показывается, только если
+   * условия истинны (logic="and" — все, "or" — хотя бы одно); field — id
+   * ДРУГОГО поля этой же формы. Пересчитывается живо, скрытое поле не
+   * попадает в отправляемые values. */
+  visibility?: {
+    logic: 'and' | 'or';
+    conditions: Array<{ field: string; operator: ComparisonOperator; value: string }>;
+  };
 }
 
 export interface MethodOperatorForm {
@@ -22,6 +42,8 @@ export interface MethodAttribute {
   id: string;
   name: string;
   data_type: AttributeDataType;
+  /** Варианты выбора (2026-08-28, WP3c) — значимо только при data_type="select". */
+  options?: string[];
 }
 
 /** Атрибут калибровки (methods.calibration_attributes) — для формы журнала калибровки. */

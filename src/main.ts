@@ -5,15 +5,30 @@ import { getService, publishService, unpublishService } from '../../../.obsidian
 import { errorMessage } from '../../../.obsidian/plugins/sbe-core/src/utils/errors';
 import type { AnnounceUpdateInput, SbeLimsMobileApi } from '../../../.obsidian/plugins/sbe-core/src/types';
 
+/** Заявка в списке «Последние заявки» на главном экране (2026-08-28) — label
+ * кэшируется на момент открытия (customer_number/lab_number), не резолвится
+ * заново при каждом рендере главного экрана: renderHome синхронный, без
+ * сетевых запросов, список должен показываться мгновенно. */
+export interface RecentRequest {
+  id: number;
+  label: string;
+}
+
 export interface MobileLimsSettings {
   /** База URL lab-service (JWT берётся из ЦУП/ЦУП Мобайл — sbe-apstore). */
   apiUrl: string;
   lastAnnouncedVersion: string;
+  /** Последние заявки, которые открывал испытатель (2026-08-28) — быстрый
+   * возврат без повторного ввода номера, см. openResult в mobile-lims-view.ts.
+   * Локально на устройстве (не синхронизируется между планшетами — это разумно,
+   * "последние" осмысленны именно для конкретного устройства/испытателя за ним). */
+  recentRequests: RecentRequest[];
 }
 
 const DEFAULT_SETTINGS: MobileLimsSettings = {
   apiUrl: 'https://epyur.fvds.ru',
   lastAnnouncedVersion: '',
+  recentRequests: [],
 };
 
 /** «ЛИМС Мобайл»: номер заявки/код оборудования (переписанный вручную из QR,
