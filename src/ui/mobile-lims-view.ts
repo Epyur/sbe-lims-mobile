@@ -464,6 +464,17 @@ export class MobileLimsView extends ItemView {
     // события форма уже полностью отрисована (см. redrawForm/switchTo).
     form.addEventListener('input', () => { dirty = true; recomputeVisibility(); });
     form.addEventListener('change', () => { dirty = true; recomputeVisibility(); });
+
+    // Таймер (2026-08-28, WP3c ч.2) — ДО обычных полей: логически первое
+    // действие испытателя ("начал эксперимент"). Пишет прямо в те же values,
+    // что и обычные поля — если admin также добавил booleanFieldId/
+    // secondsFieldId/log.attributeId в operator_form.fields, их
+    // <input>/<select> покажут записанное значение (см. renderTimerWidget).
+    const timerConfig = method.operator_form.timer;
+    if (timerConfig && (timerConfig.capture || timerConfig.log)) {
+      this.renderTimerWidget(form, timerConfig, values, () => { dirty = true; });
+    }
+
     let hasFields = false;
     for (const field of fields) {
       const sys = systemById.get(field.attribute_id);
@@ -761,6 +772,114 @@ export class MobileLimsView extends ItemView {
         status.createEl('img', { cls: 'tn-lm-photo-thumb', attr: { src: URL.createObjectURL(file) } });
       })();
     });
+  }
+
+  /** Таймер формы (2026-08-28, WP3c ч.2) — общий секундомер + опционально
+   * кнопка «Зафиксировать событие» (пишет в 2 обычных поля, останавливает
+   * таймер) и/или лог наблюдений (кнопка на каждое настроенное название,
+   * копит записи в event_log-атрибут, НЕ останавливает таймер). Состояние
+   * таймера — только этот рендер формы (замыкание), не сохраняется —
+   * стартует заново при каждом входе в форму (правка/новая серия), см. спеку.
+   * onDirty — тот же сигнал "форма менялась", что у обычных полей (влияет на
+   * неявное сохранение при переключении серии, WP3a). */
+  private renderTimerWidget(
+    form: HTMLElement, timer: NonNullable<MobileMethod['operator_form']['timer']>,
+    values: Record<string, unknown>, onDirty: () => void,
+  ): void {
+    const wrap = form.createDiv({ cls: 'tn-lm-timer tn-lm-mb8' });
+    let elapsedBeforePauseMs = 0;
+    let runningSinceMs: number | null = null;
+    let intervalId: number | undefined;
+
+    const getElapsedSeconds = (): number => {
+      const extra = runningSinceMs !== null ? Date.now() - runningSinceMs : 0;
+      return Math.floor((elapsedBeforePauseMs + extra) / 1000);
+    };
+    const formatMMSS = (totalSeconds: number): string => {
+      const m = Math.floor(totalSeconds / 60);
+      const s = totalSeconds % 60;
+      return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    };
+
+    const display = wrap.createDiv({ cls: 'tn-lm-timer-display' });
+    const redrawDisplay = (): void => { display.setText(formatMMSS(getElapsedSeconds())); };
+    redrawDisplay();
+
+    const btnRow = wrap.createDiv({ cls: 'tn-lm-flex' });
+    const toggleBtn = btnRow.createEl('button', { text: '▶ Старт', cls: 'tn-btn tn-btn-primary' });
+    const stopTicking = (): void => {
+      if (intervalId !== undefined) { window.clearInterval(intervalId); intervalId = undefined; }
+    };
+    const pause = (): void => {
+      if (runningSinceMs === null) return;
+      elapsedBeforePauseMs += Date.now() - runningSinceMs;
+      runningSinceMs = null;
+      stopTicking();
+      toggleBtn.setText('▶ Старт');
+    };
+    const start = (): void => {
+      if (runningSinceMs !== null) return;
+      runningSinceMs = Date.now();
+      toggleBtn.setText('⏸ Пауза');
+      stopTicking();
+      intervalId = window.setInterval(redrawDisplay, 1000);
+    };
+    toggleBtn.addEventListener('click', () => { (runningSinceMs === null ? start : pause)(); });
+    const resetBtn = btnRow.createEl('button', { text: '⟲ Сброс', cls: 'tn-btn tn-btn-ghost' });
+    resetBtn.addEventListener('click', () => {
+      pause();
+      elapsedBeforePauseMs = 0;
+      redrawDisplay();
+    });
+
+    // Обновляет ОТОБРАЖЕНИЕ уже отрисованного где-то в этой же форме поля
+    // (если admin включил booleanFieldId/secondsFieldId/log.attributeId в
+    // operator_form.fields) — сам values уже записан вызывающим кодом ниже,
+    // это только синхронизация видимого <input>/<select> с ним.
+    const syncFieldDisplay = (attributeId: string, value: string): void => {
+      const row = form.querySelector<HTMLElement>(`[data-attribute-id="${CSS.escape(attributeId)}"]`);
+      const input = row?.querySelector<HTMLInputElement | HTMLSelectElement>('input, select');
+      if (input) input.value = value;
+    };
+
+    if (timer.capture) {
+      const { booleanFieldId, secondsFieldId } = timer.capture;
+      const captureBtn = wrap.createEl('button', { text: '🔥 Зафиксировать событие', cls: 'tn-btn tn-btn-primary tn-lm-mt8' });
+      captureBtn.addEventListener('click', () => {
+        const seconds = getElapsedSeconds();
+        // 'Да' — строка, не JS true: булев атрибут в этой системе — select с
+        // фиксированными вариантами ['Да','Нет'] (WP3c ч.1), не настоящий
+        // boolean — значение должно совпадать с тем, что пишет сам select.
+        values[booleanFieldId] = 'Да';
+        values[secondsFieldId] = seconds;
+        syncFieldDisplay(booleanFieldId, 'Да');
+        syncFieldDisplay(secondsFieldId, String(seconds));
+        pause(); // "останавливающая эксперимент" — прямая формулировка роадмапа
+        onDirty();
+      });
+    }
+
+    if (timer.log) {
+      const { attributeId, events } = timer.log;
+      const logListEl = wrap.createDiv({ cls: 'tn-lm-meta tn-lm-mt8' });
+      const redrawLog = (): void => {
+        const entries = Array.isArray(values[attributeId]) ? values[attributeId] as Array<{ label: string; seconds: number }> : [];
+        logListEl.setText(entries.length > 0 ? entries.map(e => `${e.label} — ${formatMMSS(e.seconds)}`).join('; ') : '');
+      };
+      redrawLog();
+      const logBtnRow = wrap.createDiv({ cls: 'tn-lm-flex tn-lm-mt8' });
+      for (const label of events) {
+        const btn = logBtnRow.createEl('button', { text: label, cls: 'tn-btn tn-btn-ghost' });
+        btn.addEventListener('click', () => {
+          const entries = Array.isArray(values[attributeId]) ? values[attributeId] as unknown[] : [];
+          entries.push({ label, seconds: getElapsedSeconds() });
+          values[attributeId] = entries;
+          redrawLog();
+          onDirty();
+          // Не останавливает таймер — промежуточное наблюдение (см. спеку).
+        });
+      }
+    }
   }
 
   private renderFormField(

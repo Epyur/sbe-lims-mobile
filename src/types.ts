@@ -4,9 +4,12 @@
 
 // "curve" (2026-08-28, WP1) — только у calibration_attributes: набор точек x→y
 // (калибровочная кривая), не одно число, см. mobile-lims-view.ts renderCurvePointsField.
-// "select"/"boolean" (2026-08-28, WP3c) — <select> в форме результатов, boolean —
-// тот же рендер с неявным фиксированным списком ['Да','Нет'].
-export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'curve' | 'select' | 'boolean';
+// "select"/"boolean" (2026-08-28, WP3c ч.1) — <select> в форме результатов,
+// boolean — тот же рендер с неявным фиксированным списком ['Да','Нет'].
+// "event_log" (2026-08-28, WP3c ч.2) — массив {label,seconds}, пишут кнопки
+// лога наблюдений (см. MethodOperatorForm.timer).
+export type AttributeDataType =
+  | 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'curve' | 'select' | 'boolean' | 'event_log';
 
 /** Знак сравнения — условная видимость поля формы (2026-08-28, WP3c); тот же
  * каталог, что ComparisonOperator в sbe-lims (классификация), здесь нужен
@@ -35,6 +38,13 @@ export interface OperatorFormField {
 
 export interface MethodOperatorForm {
   fields: OperatorFormField[];
+  /** Таймер формы (2026-08-28, WP3c ч.2) — фиксированная схема, см. sbe-lims
+   * types/lims.ts за полным описанием решений брейнсторма. Ссылается на уже
+   * существующие атрибуты метода по id. */
+  timer?: {
+    capture?: { booleanFieldId: string; secondsFieldId: string };
+    log?: { attributeId: string; events: string[] };
+  };
 }
 
 /** Атрибут метода (methods.input_parameters) — для формы результатов испытания. */
