@@ -11,6 +11,29 @@ import type {
 
 export const MOBILE_LIMS_VIEW_TYPE = 'sbe-lims-mobile-view';
 
+/** Состояние запущенного секундомера формы результатов (2026-08-29, живая жалоба —
+ * секундомер не должен прерываться при переключении серий). Живёт на уровне
+ * renderResultScreen (переживает redrawForm/переключение серий) — раньше эти же поля
+ * были локальными переменными внутри renderTimerWidget и создавались заново при
+ * каждой перерисовке формы, поэтому запущенный секундомер сбрасывался при уходе с
+ * серии. `seriesNum` — какой серии принадлежит (её собственный "владелец"): виджет
+ * рендерится интерактивным только когда текущая открытая серия совпадает с этим
+ * значением (см. renderResultForm) — в остальных сериях не показывается вовсе, чтобы
+ * испытатель не мог случайно нажать кнопку завершения события не в той серии.
+ * `seriesNum === undefined` — секундомер стартовал до первого сохранения САМОЙ ПЕРВОЙ
+ * серии заявки (единственный случай, когда серии ещё нет вовсе); doSave() в
+ * renderResultForm переставляет его на реальный номер сразу после первого успешного
+ * сохранения. `redrawDisplay` переустанавливается КАЖДЫМ рендером формы-владельца —
+ * сам `intervalId` создаётся один раз при старте и продолжает тикать независимо от
+ * количества последующих перерисовок/переключений серий. */
+interface RunningTimerState {
+  seriesNum: number | undefined;
+  elapsedBeforePauseMs: number;
+  runningSinceMs: number | null;
+  intervalId: number | undefined;
+  redrawDisplay: (() => void) | undefined;
+}
+
 /** "YYYY-MM-DD" по ЛОКАЛЬНОЙ дате устройства (2026-08-28, WP3b) — испытатель
  * физически рядом с образцом, локальное время устройства и есть время
  * эксперимента, часовой пояс сервера не участвует в сравнении "тот же день". */
@@ -275,6 +298,9 @@ export class MobileLimsView extends ItemView {
      * открытой серии как явный сабмит; используется переключателем серий ниже. */
     let currentSave: (() => Promise<number | null>) | undefined;
     let currentIsDirty: (() => boolean) | undefined;
+    /** Запущенный секундомер (см. RunningTimerState) — переживает переключение серий,
+     * см. комментарий у типа. undefined, пока ни в одной серии секундомер не стартован. */
+    let runningTimer: RunningTimerState | undefined;
 
     // Системные поля (дата/условия среды) для НОВОЙ серии (2026-08-28, WP3b) —
     // показываются только если это первая серия заявки или день изменился с
@@ -325,6 +351,16 @@ export class MobileLimsView extends ItemView {
                 // results.go handleDeleteResultSeries) — синхронно сдвигаем указатель.
                 currentSeriesNum -= 1;
               }
+              // Та же перенумерация касается и владельца запущенного секундомера
+              // (2026-08-29) — если удалили именно его серию, секундомеру больше
+              // некуда писать (останавливаем); если удалили серию ДО него, его номер
+              // тоже сдвигается на −1 вместе с остальными.
+              if (runningTimer?.seriesNum === s.series_num) {
+                if (runningTimer.intervalId !== undefined) window.clearInterval(runningTimer.intervalId);
+                runningTimer = undefined;
+              } else if (runningTimer?.seriesNum !== undefined && runningTimer.seriesNum > s.series_num) {
+                runningTimer.seriesNum -= 1;
+              }
               redrawSwitcher();
               redrawForm();
             } catch (e: unknown) {
@@ -342,7 +378,7 @@ export class MobileLimsView extends ItemView {
         formHost, requestId, method!, currentSeriesNum, existing, mainEquipmentIds, equipmentList,
         shouldShowSystemFieldsForNewSeries,
         {
-          onAddNew: () => { void switchTo(undefined); },
+          onAddNew: () => { void addNewSeries(); },
           onSeriesSaved: (savedNum) => {
             void (async () => {
               await refreshSeries();
@@ -351,15 +387,18 @@ export class MobileLimsView extends ItemView {
             })();
           },
         },
+        { get: () => runningTimer, set: (v) => { runningTimer = v; } },
       );
       currentSave = api.save;
       currentIsDirty = api.isDirty;
     };
 
-    /** Переключение на другую серию/на новую — сначала неявно сохраняет текущую
-     * форму, если её меняли (те же данные, что «Отправить результаты»). Если
+    /** Переключение на другую УЖЕ СУЩЕСТВУЮЩУЮ серию — сначала неявно сохраняет
+     * текущую форму, если её меняли (те же данные, что «Отправить результаты»). Если
      * сохранение не удалось (ошибка валидации/сети) — переключение отменяется,
-     * ошибка уже показана в форме, испытатель остаётся на месте и может исправить. */
+     * ошибка уже показана в форме, испытатель остаётся на месте и может исправить.
+     * Секундомера не касается вовсе — он живёт в runningTimer, а не в форме, см. тип
+     * RunningTimerState. */
     const switchTo = async (target: number | undefined): Promise<void> => {
       if (target === currentSeriesNum) return;
       if (currentIsDirty?.() && currentSave) {
@@ -369,6 +408,34 @@ export class MobileLimsView extends ItemView {
       currentSeriesNum = target;
       redrawSwitcher();
       redrawForm();
+    };
+
+    /** «Добавить серию» (2026-08-29, переработано по живой жалобе — раньше кнопка
+     * просто показывала ПУСТУЮ несохранённую форму: реальная запись новой серии
+     * появлялась в БД только после отдельного нажатия «Отправить результаты» для неё,
+     * а до этого момента был риск запутаться, какая серия сейчас активна. Теперь одно
+     * нажатие делает оба шага сразу: сохраняет текущую серию (если менялась) И тут же
+     * создаёт в БД новую пустую серию (с теми же дефолтами системных полей, что и
+     * раньше показывались бы в форме), переключаясь на неё уже как на реально
+     * сохранённую. Секундомер (если запущен в другой серии) это не прерывает — он
+     * живёт в runningTimer независимо от того, какая серия сейчас открыта в форме. */
+    const addNewSeries = async (): Promise<void> => {
+      if (currentIsDirty?.() && currentSave) {
+        const saved = await currentSave();
+        if (saved === null) return;
+      }
+      try {
+        const sv = shouldShowSystemFieldsForNewSeries ? todayLocalDateString() : undefined;
+        const created = await this.plugin.syncService.saveResult(requestId, method!.id, {}, {
+          reportDate: sv, expDate: sv,
+        });
+        await refreshSeries();
+        currentSeriesNum = created.series_num;
+        redrawSwitcher();
+        redrawForm();
+      } catch (e: unknown) {
+        new Notice(`Не удалось создать новую серию: ${errorMessage(e)}`);
+      }
     };
 
     redrawSwitcher();
@@ -398,6 +465,7 @@ export class MobileLimsView extends ItemView {
     existingSeries: MobileResult | undefined, mainEquipmentIds: number[], equipmentList: MobileEquipment[],
     shouldShowSystemFieldsForNewSeries: boolean,
     callbacks: { onAddNew: () => void; onSeriesSaved: (seriesNum: number) => void },
+    timerRef: { get: () => RunningTimerState | undefined; set: (v: RunningTimerState | undefined) => void },
   ): { save: () => Promise<number | null>; isDirty: () => boolean } {
     let seriesNum = initialSeriesNum;
     let dirty = false;
@@ -474,9 +542,18 @@ export class MobileLimsView extends ItemView {
     // (до редизайна кнопок-событий), которая ещё может лежать в БД у метода,
     // если админ его не пересохранял — buttons тогда undefined, .length упал
     // бы с TypeError вместо того, чтобы просто не показать таймер.
+    // Секундомер рендерится ТОЛЬКО когда либо ещё никто его не запускал (можно
+    // стартовать здесь), либо он уже запущен именно в ЭТОЙ серии (initialSeriesNum —
+    // номер, под которым он стартовал, см. переприсвоение в doSave ниже при первом
+    // сохранении новой серии) — 2026-08-29, живая жалоба: секундомер должен
+    // продолжать идти при переключении серий, но быть видимым/интерактивным только
+    // в своей серии, чтобы испытатель не нажал кнопку завершения события не в той
+    // серии (см. RunningTimerState).
+    const existingTimer = timerRef.get();
+    const ownsRunningTimer = existingTimer === undefined || existingTimer.seriesNum === initialSeriesNum;
     const timerConfig = method.operator_form.timer;
-    if (timerConfig && Array.isArray(timerConfig.buttons) && timerConfig.buttons.length > 0) {
-      this.renderTimerWidget(form, timerConfig, values, () => { dirty = true; });
+    if (ownsRunningTimer && timerConfig && Array.isArray(timerConfig.buttons) && timerConfig.buttons.length > 0) {
+      this.renderTimerWidget(form, timerConfig, values, () => { dirty = true; }, timerRef, initialSeriesNum);
     }
 
     let hasFields = false;
@@ -570,6 +647,14 @@ export class MobileLimsView extends ItemView {
         // см. claimInstrumentBuffer) — очищаем поле, чтобы случайный повторный
         // сабмит/автосохранение при переключении серии не пытался занять его снова.
         hashInput.value = '';
+        // Секундомер мог стартовать ДО первого сохранения этой (тогда ещё безномерной)
+        // серии (initialSeriesNum === undefined) — переставляем его на реальный
+        // присвоенный номер, иначе после этого сохранения он перестанет считаться
+        // "своим" для этой же серии (2026-08-29, см. RunningTimerState).
+        const rt = timerRef.get();
+        if (rt && rt.seriesNum === initialSeriesNum && saved.series_num !== initialSeriesNum) {
+          rt.seriesNum = saved.series_num;
+        }
         seriesNum = saved.series_num;
         titleEl.setText(`Серия ${seriesNum}`);
         callbacks.onSeriesSaved(seriesNum);
@@ -778,29 +863,40 @@ export class MobileLimsView extends ItemView {
     });
   }
 
-  /** Таймер формы (2026-08-28, WP3c ч.2; переработано 2026-08-29 по живой
-   * жалобе — единственная фиксированная кнопка "Зафиксировать событие" не
-   * подходила: нужен список СОБЫТИЙ С РАЗНЫМИ НАЗВАНИЯМИ, у каждого свой
-   * результат). Общий секундомер + кнопка на каждое настроенное событие —
-   * "capture"-кнопки заполняют 2 обычных поля и останавливают таймер (напр.
-   * "Зафиксировано воспламенение"), "log"-кнопки добавляют запись в лог
-   * наблюдений и НЕ останавливают таймер (напр. "зафиксирована вспышка до
-   * 5 с"). Состояние таймера — только этот рендер формы (замыкание), не
-   * сохраняется — стартует заново при каждом входе в форму, см. спеку.
-   * onDirty — тот же сигнал "форма менялась" (влияет на неявное сохранение
-   * при переключении серии, WP3a). */
+  /** Таймер формы (2026-08-28, WP3c ч.2; переработано 2026-08-29 по живой жалобе —
+   * "Зафиксировать событие" заменено на список событий с разными названиями; ЕЩЁ РАЗ
+   * переработано 2026-08-29 по второй живой жалобе — состояние таймера БОЛЬШЕ НЕ
+   * привязано к этому рендеру формы: живёт в `timerRef` на уровне renderResultScreen
+   * (см. RunningTimerState) и переживает переключение серий. `ownSeriesNum` — номер
+   * серии, которой принадлежит ЭТОТ рендер (см. вызывающий код в renderResultForm,
+   * который вообще не вызывает эту функцию, если секундомер уже занят ДРУГОЙ серией).
+   * Общий секундомер + кнопка на каждое настроенное событие — "capture"-кнопки
+   * заполняют 2 обычных поля и останавливают таймер (напр. "Зафиксировано
+   * воспламенение"), "log"-кнопки добавляют запись в лог наблюдений и НЕ
+   * останавливают таймер (напр. "зафиксирована вспышка до 5 с"). onDirty — тот же
+   * сигнал "форма менялась" (влияет на неявное сохранение при переключении серии,
+   * WP3a). */
   private renderTimerWidget(
     form: HTMLElement, timer: NonNullable<MobileMethod['operator_form']['timer']>,
     values: Record<string, unknown>, onDirty: () => void,
+    timerRef: { get: () => RunningTimerState | undefined; set: (v: RunningTimerState | undefined) => void },
+    ownSeriesNum: number | undefined,
   ): void {
     const wrap = form.createDiv({ cls: 'tn-lm-timer tn-lm-mb8' });
-    let elapsedBeforePauseMs = 0;
-    let runningSinceMs: number | null = null;
-    let intervalId: number | undefined;
+
+    // Переиспользуем уже существующее состояние (секундомер запущен/на паузе и
+    // принадлежит именно этой серии — вызывающий код гарантирует это, не рендеря
+    // виджет для ЧУЖОЙ серии вовсе) либо создаём свежее. В timerRef регистрируется
+    // только при РЕАЛЬНОМ первом старте (см. start() ниже) — простой заход в форму
+    // без нажатия "Старт" ничего не занимает, другая серия сможет стартовать свой.
+    const existing = timerRef.get();
+    const state: RunningTimerState = existing && existing.seriesNum === ownSeriesNum
+      ? existing
+      : { seriesNum: ownSeriesNum, elapsedBeforePauseMs: 0, runningSinceMs: null, intervalId: undefined, redrawDisplay: undefined };
 
     const getElapsedSeconds = (): number => {
-      const extra = runningSinceMs !== null ? Date.now() - runningSinceMs : 0;
-      return Math.floor((elapsedBeforePauseMs + extra) / 1000);
+      const extra = state.runningSinceMs !== null ? Date.now() - state.runningSinceMs : 0;
+      return Math.floor((state.elapsedBeforePauseMs + extra) / 1000);
     };
     const formatMMSS = (totalSeconds: number): string => {
       const m = Math.floor(totalSeconds / 60);
@@ -809,33 +905,43 @@ export class MobileLimsView extends ItemView {
     };
 
     const display = wrap.createDiv({ cls: 'tn-lm-timer-display' });
+    // Переустанавливаем указатель на display ТЕКУЩЕГО рендера — сам интервал (если
+    // уже тикает, см. state.intervalId) создан один раз при старте и не трогается
+    // здесь, просто продолжает вызывать актуальный redrawDisplay.
     const redrawDisplay = (): void => { display.setText(formatMMSS(getElapsedSeconds())); };
+    state.redrawDisplay = redrawDisplay;
     redrawDisplay();
 
     const btnRow = wrap.createDiv({ cls: 'tn-lm-flex' });
-    const toggleBtn = btnRow.createEl('button', { text: '▶ Старт', cls: 'tn-btn tn-btn-primary' });
+    const toggleBtn = btnRow.createEl('button', {
+      text: state.runningSinceMs !== null ? '⏸ Пауза' : '▶ Старт', cls: 'tn-btn tn-btn-primary',
+    });
     const stopTicking = (): void => {
-      if (intervalId !== undefined) { window.clearInterval(intervalId); intervalId = undefined; }
+      if (state.intervalId !== undefined) { window.clearInterval(state.intervalId); state.intervalId = undefined; }
     };
     const pause = (): void => {
-      if (runningSinceMs === null) return;
-      elapsedBeforePauseMs += Date.now() - runningSinceMs;
-      runningSinceMs = null;
+      if (state.runningSinceMs === null) return;
+      state.elapsedBeforePauseMs += Date.now() - state.runningSinceMs;
+      state.runningSinceMs = null;
       stopTicking();
       toggleBtn.setText('▶ Старт');
     };
     const start = (): void => {
-      if (runningSinceMs !== null) return;
-      runningSinceMs = Date.now();
+      if (state.runningSinceMs !== null) return;
+      state.runningSinceMs = Date.now();
       toggleBtn.setText('⏸ Пауза');
       stopTicking();
-      intervalId = window.setInterval(redrawDisplay, 1000);
+      state.intervalId = window.setInterval(() => state.redrawDisplay?.(), 1000);
+      // Регистрируем владение ТОЛЬКО сейчас, при первом реальном старте (см. комментарий
+      // выше у объявления state) — до этого момента виджет мог рендериться в любой
+      // серии без каких-либо последствий.
+      timerRef.set(state);
     };
-    toggleBtn.addEventListener('click', () => { (runningSinceMs === null ? start : pause)(); });
+    toggleBtn.addEventListener('click', () => { (state.runningSinceMs === null ? start : pause)(); });
     const resetBtn = btnRow.createEl('button', { text: '⟲ Сброс', cls: 'tn-btn tn-btn-ghost' });
     resetBtn.addEventListener('click', () => {
       pause();
-      elapsedBeforePauseMs = 0;
+      state.elapsedBeforePauseMs = 0;
       redrawDisplay();
     });
 
