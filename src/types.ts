@@ -34,16 +34,23 @@ export interface OperatorFormField {
     logic: 'and' | 'or';
     conditions: Array<{ field: string; operator: ComparisonOperator; value: string }>;
   };
+  /** Рекомендуемые значения (2026-08-29) — кнопки-подсказки под полем, клик
+   * подставляет точный текст (поле остаётся свободным вводом, не select). */
+  suggestions?: string[];
 }
 
 export interface MethodOperatorForm {
   fields: OperatorFormField[];
-  /** Таймер формы (2026-08-28, WP3c ч.2) — фиксированная схема, см. sbe-lims
-   * types/lims.ts за полным описанием решений брейнсторма. Ссылается на уже
-   * существующие атрибуты метода по id. */
+  /** Таймер формы (2026-08-28, WP3c ч.2; переработано 2026-08-29) — список
+   * именованных кнопок, см. sbe-lims types/lims.ts за полным описанием.
+   * Ссылается на уже существующие атрибуты метода по id. */
   timer?: {
-    capture?: { booleanFieldId: string; secondsFieldId: string };
-    log?: { attributeId: string; events: string[] };
+    buttons: Array<{
+      label: string;
+      action:
+        | { kind: 'capture'; booleanFieldId: string; secondsFieldId: string }
+        | { kind: 'log'; attributeId: string };
+    }>;
   };
 }
 

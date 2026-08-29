@@ -1,6 +1,6 @@
 {
   "name": "sbe-lims-mobile",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "ЛИМС Мобайл — мобильный ввод результатов испытаний и калибровки оборудования по QR",
   "main": "main.js",
   "scripts": {

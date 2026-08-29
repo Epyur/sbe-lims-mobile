@@ -468,10 +468,14 @@ export class MobileLimsView extends ItemView {
     // Таймер (2026-08-28, WP3c ч.2) — ДО обычных полей: логически первое
     // действие испытателя ("начал эксперимент"). Пишет прямо в те же values,
     // что и обычные поля — если admin также добавил booleanFieldId/
-    // secondsFieldId/log.attributeId в operator_form.fields, их
-    // <input>/<select> покажут записанное значение (см. renderTimerWidget).
+    // secondsFieldId в operator_form.fields, их <input>/<select> покажут
+    // записанное значение (см. renderTimerWidget).
+    // Array.isArray (2026-08-29) — защита от старой формы timer.{capture,log}
+    // (до редизайна кнопок-событий), которая ещё может лежать в БД у метода,
+    // если админ его не пересохранял — buttons тогда undefined, .length упал
+    // бы с TypeError вместо того, чтобы просто не показать таймер.
     const timerConfig = method.operator_form.timer;
-    if (timerConfig && (timerConfig.capture || timerConfig.log)) {
+    if (timerConfig && Array.isArray(timerConfig.buttons) && timerConfig.buttons.length > 0) {
       this.renderTimerWidget(form, timerConfig, values, () => { dirty = true; });
     }
 
@@ -774,14 +778,17 @@ export class MobileLimsView extends ItemView {
     });
   }
 
-  /** Таймер формы (2026-08-28, WP3c ч.2) — общий секундомер + опционально
-   * кнопка «Зафиксировать событие» (пишет в 2 обычных поля, останавливает
-   * таймер) и/или лог наблюдений (кнопка на каждое настроенное название,
-   * копит записи в event_log-атрибут, НЕ останавливает таймер). Состояние
-   * таймера — только этот рендер формы (замыкание), не сохраняется —
-   * стартует заново при каждом входе в форму (правка/новая серия), см. спеку.
-   * onDirty — тот же сигнал "форма менялась", что у обычных полей (влияет на
-   * неявное сохранение при переключении серии, WP3a). */
+  /** Таймер формы (2026-08-28, WP3c ч.2; переработано 2026-08-29 по живой
+   * жалобе — единственная фиксированная кнопка "Зафиксировать событие" не
+   * подходила: нужен список СОБЫТИЙ С РАЗНЫМИ НАЗВАНИЯМИ, у каждого свой
+   * результат). Общий секундомер + кнопка на каждое настроенное событие —
+   * "capture"-кнопки заполняют 2 обычных поля и останавливают таймер (напр.
+   * "Зафиксировано воспламенение"), "log"-кнопки добавляют запись в лог
+   * наблюдений и НЕ останавливают таймер (напр. "зафиксирована вспышка до
+   * 5 с"). Состояние таймера — только этот рендер формы (замыкание), не
+   * сохраняется — стартует заново при каждом входе в форму, см. спеку.
+   * onDirty — тот же сигнал "форма менялась" (влияет на неявное сохранение
+   * при переключении серии, WP3a). */
   private renderTimerWidget(
     form: HTMLElement, timer: NonNullable<MobileMethod['operator_form']['timer']>,
     values: Record<string, unknown>, onDirty: () => void,
@@ -833,52 +840,65 @@ export class MobileLimsView extends ItemView {
     });
 
     // Обновляет ОТОБРАЖЕНИЕ уже отрисованного где-то в этой же форме поля
-    // (если admin включил booleanFieldId/secondsFieldId/log.attributeId в
-    // operator_form.fields) — сам values уже записан вызывающим кодом ниже,
-    // это только синхронизация видимого <input>/<select> с ним.
+    // (если admin включил booleanFieldId/secondsFieldId в operator_form.fields)
+    // — сам values уже записан вызывающим кодом ниже, это только синхронизация
+    // видимого <input>/<select> с ним.
     const syncFieldDisplay = (attributeId: string, value: string): void => {
       const row = form.querySelector<HTMLElement>(`[data-attribute-id="${CSS.escape(attributeId)}"]`);
       const input = row?.querySelector<HTMLInputElement | HTMLSelectElement>('input, select');
       if (input) input.value = value;
     };
 
-    if (timer.capture) {
-      const { booleanFieldId, secondsFieldId } = timer.capture;
-      const captureBtn = wrap.createEl('button', { text: '🔥 Зафиксировать событие', cls: 'tn-btn tn-btn-primary tn-lm-mt8' });
-      captureBtn.addEventListener('click', () => {
+    // Лог наблюдений — общий на ВСЕ log-кнопки (может быть несколько с разными
+    // attributeId, если админ так настроил, хотя обычно один): показываем
+    // накопленные записи КАЖДОГО встретившегося log-атрибута сразу под кнопками,
+    // тем же форматом "N сек - label", что и в протоколе (formatEventLog,
+    // lab-service/protocol.go) — испытатель сразу видит то же, что попадёт в
+    // документ, не гадает.
+    const logAttributeIds = timer.buttons
+      .filter((b): b is typeof b & { action: { kind: 'log'; attributeId: string } } => b.action.kind === 'log')
+      .map(b => b.action.attributeId)
+      .filter((id, i, arr) => arr.indexOf(id) === i);
+    const logPreviewEls = new Map<string, HTMLElement>();
+    if (logAttributeIds.length > 0) {
+      const logPreviewWrap = wrap.createDiv({ cls: 'tn-lm-meta tn-lm-mt8' });
+      for (const attributeId of logAttributeIds) {
+        logPreviewEls.set(attributeId, logPreviewWrap.createDiv());
+      }
+    }
+    const redrawLogPreview = (attributeId: string): void => {
+      const el = logPreviewEls.get(attributeId);
+      if (!el) return;
+      const entries = Array.isArray(values[attributeId]) ? values[attributeId] as Array<{ label: string; seconds: number }> : [];
+      el.setText(entries.length > 0 ? entries.map(e => `${e.seconds} сек - ${e.label}`).join('; ') : '');
+    };
+    for (const attributeId of logAttributeIds) redrawLogPreview(attributeId);
+
+    const btnGrid = wrap.createDiv({ cls: 'tn-lm-flex tn-lm-mt8' });
+    for (const btn of timer.buttons) {
+      const el = btnGrid.createEl('button', { text: btn.label, cls: 'tn-btn tn-btn-primary' });
+      el.addEventListener('click', () => {
         const seconds = getElapsedSeconds();
-        // 'Да' — строка, не JS true: булев атрибут в этой системе — select с
-        // фиксированными вариантами ['Да','Нет'] (WP3c ч.1), не настоящий
-        // boolean — значение должно совпадать с тем, что пишет сам select.
-        values[booleanFieldId] = 'Да';
-        values[secondsFieldId] = seconds;
-        syncFieldDisplay(booleanFieldId, 'Да');
-        syncFieldDisplay(secondsFieldId, String(seconds));
-        pause(); // "останавливающая эксперимент" — прямая формулировка роадмапа
+        if (btn.action.kind === 'capture') {
+          const { booleanFieldId, secondsFieldId } = btn.action;
+          // 'Да' — строка, не JS true: булев атрибут в этой системе — select с
+          // фиксированными вариантами ['Да','Нет'] (WP3c ч.1), не настоящий
+          // boolean — значение должно совпадать с тем, что пишет сам select.
+          values[booleanFieldId] = 'Да';
+          values[secondsFieldId] = seconds;
+          syncFieldDisplay(booleanFieldId, 'Да');
+          syncFieldDisplay(secondsFieldId, String(seconds));
+          pause(); // "останавливающая эксперимент" — прямая формулировка роадмапа
+        } else {
+          const { attributeId } = btn.action;
+          const entries = Array.isArray(values[attributeId]) ? values[attributeId] as unknown[] : [];
+          entries.push({ label: btn.label, seconds });
+          values[attributeId] = entries;
+          redrawLogPreview(attributeId);
+          // Не останавливает таймер — промежуточное наблюдение (см. спеку).
+        }
         onDirty();
       });
-    }
-
-    if (timer.log) {
-      const { attributeId, events } = timer.log;
-      const logListEl = wrap.createDiv({ cls: 'tn-lm-meta tn-lm-mt8' });
-      const redrawLog = (): void => {
-        const entries = Array.isArray(values[attributeId]) ? values[attributeId] as Array<{ label: string; seconds: number }> : [];
-        logListEl.setText(entries.length > 0 ? entries.map(e => `${e.label} — ${formatMMSS(e.seconds)}`).join('; ') : '');
-      };
-      redrawLog();
-      const logBtnRow = wrap.createDiv({ cls: 'tn-lm-flex tn-lm-mt8' });
-      for (const label of events) {
-        const btn = logBtnRow.createEl('button', { text: label, cls: 'tn-btn tn-btn-ghost' });
-        btn.addEventListener('click', () => {
-          const entries = Array.isArray(values[attributeId]) ? values[attributeId] as unknown[] : [];
-          entries.push({ label, seconds: getElapsedSeconds() });
-          values[attributeId] = entries;
-          redrawLog();
-          onDirty();
-          // Не останавливает таймер — промежуточное наблюдение (см. спеку).
-        });
-      }
     }
   }
 
@@ -945,6 +965,24 @@ export class MobileLimsView extends ItemView {
       if (v === '') { delete values[field.attribute_id]; return; }
       values[field.attribute_id] = (dataType === 'int' || dataType === 'float') ? Number(v) : v;
     });
+
+    // Рекомендуемые значения (2026-08-29, живая жалоба — испытатель должен был
+    // набирать стандартные формулировки типа "Асбоцементный лист, толщиной
+    // 10 мм" вручную и мог ошибиться в букве) — кнопки-подсказки под полем,
+    // клик подставляет ТОЧНЫЙ текст, но поле остаётся свободным вводом (не
+    // select) — можно ввести и что-то другое. Диспатчим настоящее 'input'
+    // событие, а не пишем values напрямую — так это неотличимо от ручного
+    // набора (задействует ту же делегированную видимость/dirty-логику формы).
+    if (field.suggestions && field.suggestions.length > 0) {
+      const chipsRow = row.createDiv({ cls: 'tn-lm-flex tn-lm-mt8' });
+      for (const suggestion of field.suggestions) {
+        const chip = chipsRow.createEl('button', { text: suggestion, cls: 'tn-btn tn-btn-ghost' });
+        chip.addEventListener('click', () => {
+          input.value = suggestion;
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+      }
+    }
   }
 
   /** Список точек калибровочной кривой (2026-08-28, WP1) — мобильный аналог

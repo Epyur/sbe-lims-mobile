@@ -67,6 +67,37 @@
 
 ## История работ
 
+### 2026-08-29 — v0.1.14 (редизайн таймера: список кнопок; рекомендуемые значения)
+
+Живая жалоба пользователя после тестирования v0.1.13 — полный разбор и найденный
+живой баг (`OperatorFormField.Default`/`Visibility` терялись при `GET /methods`)
+в `lab-service/AGENTS.md`; конфигуратор только на десктопе, здесь — только
+рендер готовой конфигурации.
+
+- `types.ts`: `MethodOperatorForm.timer` — было `{capture?, log?}`, стало
+  `{buttons: Array<{label, action: {kind:'capture',...} | {kind:'log',...}}>}`.
+  `OperatorFormField` += `suggestions?: string[]`.
+- `mobile-lims-view.ts`:
+  - `renderTimerWidget` переписан на цикл по `timer.buttons` — каждая кнопка
+    рендерится по своей `label`, диспетчер по `action.kind` вместо отдельных
+    `if (timer.capture)`/`if (timer.log)` блоков; лог-превью общий на все
+    log-кнопки (по уникальным `attributeId`), формат исправлен на
+    `"${seconds} сек - ${label}"` (было `"${label} — ${formatMMSS(seconds)}"`).
+  - `renderFormField` — рендерит `field.suggestions` как кнопки-чипсы под
+    обычным текстовым `<input>` (не select/boolean/curve) — клик подставляет
+    точный текст через настоящее `input`-событие (та же delegated dirty/
+    visibility-логика, что у ручного набора).
+  - Защита `Array.isArray(timerConfig.buttons)` перед рендером — старая форма
+    `{capture,log}` не роняет форму `TypeError`.
+- `npx tsc --noEmit -skipLibCheck` EXIT=0, `npm run build` OK. Версия 0.1.13 →
+  **0.1.14**.
+- **Живой E2E** (throwaway-метод+заявка, удалены после проверки) — новый
+  `timer.buttons` (1 capture + 1 log) и `suggestions` сохранены/прочитаны без
+  потерь; протокол показал лог как `"150 сек - зафиксирована вспышка до 5 с;
+  155 сек - зафиксирована пробежка пламени"` — точное совпадение с примером
+  пользователя. Подробности бэкенд-фикса и миграции реального метода «ГВ» —
+  `lab-service/AGENTS.md`.
+
 ### 2026-08-28 — v0.1.13 (WP3c ч.2/2 — таймер, захват события, лог наблюдений; WP3 закрыт)
 
 Спека/план: `docs/superpowers/specs/2026-08-28-sbe-lims-timer-widget-design.md`
