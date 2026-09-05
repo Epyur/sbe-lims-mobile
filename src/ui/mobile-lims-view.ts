@@ -473,21 +473,31 @@ export class MobileLimsView extends ItemView {
       cls: 'tn-lm-meta tn-lm-mb8', text: seriesNum !== undefined ? `Серия ${seriesNum}` : 'Новая серия',
     });
 
-    // Hash от прибора (2026-08-28, WP3d — последний некодированный кусочек:
-    // буфер/claim на сервере уже полностью готов и задеплоен, см.
-    // lab-service/AGENTS.md "Буфер результатов приборов"). Испытатель
-    // переписывает hash с экрана/QR прибора (TDT Reader и т.п.) сюда — сервер
-    // атомарно заявляет буфер по hash и домешивает его values В values этой
-    // серии (вручную введённое приоритетнее, см. handleCreateResult); поле
-    // необязательное — методы без прибора его просто не трогают.
-    const hashRow = body.createDiv({ cls: 'tn-lm-field' });
-    hashRow.createEl('label', { cls: 'tn-lm-label', text: 'Hash от прибора (опционально)' });
-    const hashInput = hashRow.createEl('input', {
-      attr: { type: 'text', placeholder: 'Вставьте hash с экрана/QR прибора' }, cls: 'tn-lm-input',
-    });
-    hashInput.addEventListener('input', () => { dirty = true; });
-
     const attrById = new Map(method.input_parameters.map(a => [a.id, a] as const));
+
+    // Hash от прибора (2026-08-28, WP3d — буфер/claim на сервере полностью
+    // готов и задеплоен, см. lab-service/AGENTS.md "Буфер результатов
+    // приборов"). До 2026-09-05 поле показывалось безусловно для ЛЮБОГО
+    // метода — теперь настраиваемый атрибут (data_type="instrument_hash" в
+    // operator_form.fields метода, см. sbe-lims конфигуратор): поле есть,
+    // только если админ метода явно его добавил (сейчас — метод «ГГ»).
+    // Испытатель переписывает hash с экрана/QR прибора (TDT Reader и т.п.)
+    // сюда — сервер атомарно заявляет буфер по hash и домешивает его values
+    // В values этой серии (вручную введённое приоритетнее, см.
+    // handleCreateResult); значение уходит ОТДЕЛЬНО от обычных values (см.
+    // instrumentHash в doSave ниже), не как значение самого атрибута.
+    const instrumentHashField = method.operator_form.fields.find(
+      f => attrById.get(f.attribute_id)?.data_type === 'instrument_hash',
+    );
+    let hashInput: HTMLInputElement | undefined;
+    if (instrumentHashField) {
+      const hashRow = body.createDiv({ cls: 'tn-lm-field' });
+      hashRow.createEl('label', { cls: 'tn-lm-label', text: instrumentHashField.label || 'Хэш прибора' });
+      hashInput = hashRow.createEl('input', {
+        attr: { type: 'text', placeholder: 'Вставьте hash с экрана/QR прибора' }, cls: 'tn-lm-input',
+      });
+      hashInput.addEventListener('input', () => { dirty = true; });
+    }
     // Системные поля (2026-08-27; per-series с 2026-08-28, WP3b) — те же id, что
     // report_date/samples_in_date/exp_date/amb_temp/amb_pres/amb_moist; попадают
     // в форму, только если админ явно добавил их в operator_form.fields
@@ -567,6 +577,10 @@ export class MobileLimsView extends ItemView {
       }
       const attr = attrById.get(field.attribute_id);
       if (attr && attr.data_type === 'photo') continue; // вне scope v1
+      // instrument_hash (2026-09-05) — уже отрисован отдельным выделенным
+      // виджетом выше (hashInput), не как обычное значение; пропускаем здесь,
+      // иначе показалось бы два инпута для одного и того же атрибута.
+      if (attr && attr.data_type === 'instrument_hash') continue;
       hasFields = true;
       this.renderFormField(form, field, attr?.data_type || 'text', values, attr?.options);
     }
@@ -639,14 +653,15 @@ export class MobileLimsView extends ItemView {
           reportDate: sv('report_date'), samplesInDate: sv('samples_in_date'), expDate: sv('exp_date'),
           ambTemp: sv('amb_temp'), ambPres: sv('amb_pres'), ambMoist: sv('amb_moist'),
           equipmentId: equipmentSelect ? Number(equipmentSelect.value) : undefined,
-          instrumentHash: hashInput.value.trim() || undefined,
+          instrumentHash: hashInput?.value.trim() || undefined,
           seriesNum,
         });
         dirty = false;
         // Hash одноразовый (сервер помечает его использованным при успешном claim,
         // см. claimInstrumentBuffer) — очищаем поле, чтобы случайный повторный
         // сабмит/автосохранение при переключении серии не пытался занять его снова.
-        hashInput.value = '';
+        // Поля может не быть вообще, если метод не настроил instrument_hash-атрибут.
+        if (hashInput) hashInput.value = '';
         // Секундомер мог стартовать ДО первого сохранения этой (тогда ещё безномерной)
         // серии (initialSeriesNum === undefined) — переставляем его на реальный
         // присвоенный номер, иначе после этого сохранения он перестанет считаться

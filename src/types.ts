@@ -8,8 +8,12 @@
 // boolean — тот же рендер с неявным фиксированным списком ['Да','Нет'].
 // "event_log" (2026-08-28, WP3c ч.2) — массив {label,seconds}, пишут кнопки
 // лога наблюдений (см. MethodOperatorForm.timer).
+// "instrument_hash" (2026-09-05) — маркер конфигурации "этому методу нужно
+// поле ввода hash прибора"; значение НЕ хранится как values этого атрибута,
+// уходит отдельным полем instrument_hash тела запроса, см. mobile-lims-view.ts.
 export type AttributeDataType =
-  | 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'curve' | 'select' | 'boolean' | 'event_log';
+  | 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'curve' | 'select' | 'boolean' | 'event_log'
+  | 'instrument_hash';
 
 /** Знак сравнения — условная видимость поля формы (2026-08-28, WP3c); тот же
  * каталог, что ComparisonOperator в sbe-lims (классификация), здесь нужен

@@ -120,7 +120,8 @@ export default class SbeLimsMobilePlugin extends Plugin {
           appId: this.manifest.id,
           appName: this.manifest.name,
           version: this.manifest.version,
-          summary: 'Обновлена мобильная ЛИМС: исправления и улучшения.',
+          summary: 'Поле для ввода кода прибора в форме результатов теперь показывается ' +
+            'только для тех методов испытаний, где оно действительно нужно.',
         });
       }
       this.settings.lastAnnouncedVersion = this.manifest.version;
